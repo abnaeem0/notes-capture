@@ -8,6 +8,8 @@ const output = document.getElementById("output");
 const savedDiv = document.getElementById("saved");
 const project = document.getElementById("project");
 
+YOUR_WORKER_URL="https://notes-capture.abubakarnaeem0.workers.dev/"
+
 // Load saved notes
 let notes = JSON.parse(localStorage.getItem("notes") || "[]");
 renderSaved();
