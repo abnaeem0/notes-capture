@@ -8,8 +8,6 @@ const output = document.getElementById("output");
 const savedDiv = document.getElementById("saved");
 const project = document.getElementById("project");
 
-YOUR_WORKER_URL="https://notes-capture.abubakarnaeem0.workers.dev/"
-
 // Load saved notes
 let notes = JSON.parse(localStorage.getItem("notes") || "[]");
 renderSaved();
@@ -84,7 +82,7 @@ function trySpeechToText(item) {
 }
 
 async function sendToAI() {
-  const res = await fetch("YOUR_WORKER_URL", {
+  const res = await fetch("https://notes-capture.abubakarnaeem0.workers.dev/", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
