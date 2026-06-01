@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Capture System v1</title>
+  <style>
+    body { font-family: Arial; padding: 10px; }
+    button { font-size: 18px; padding: 10px; margin: 5px; }
+    textarea { width: 100%; height: 80px; }
+    .box { margin-bottom: 15px; }
+    .recording { background: red; color: white; }
+  </style>
+</head>
+
+<body>
+
+<h2>Capture</h2>
+
+<div class="box">
+  Project:
+  <select id="project">
+    <option>Hotel</option>
+    <option>General</option>
+    <option>Ideas</option>
+  </select>
+</div>
+
+<div class="box">
+  <button id="micBtn">🎤 Hold / Tap to Record</button>
+</div>
+
+<div class="box">
+  <textarea id="textBox" placeholder="Your text will appear here..."></textarea>
+</div>
+
+<div class="box">
+  <button onclick="sendToAI()">Send to AI</button>
+</div>
+
+<h3>Output</h3>
+<pre id="output"></pre>
+
+<h3>Saved (Local)</h3>
+<pre id="saved"></pre>
+
+<script src="app.js"></script>
+
+</body>
+</html>
