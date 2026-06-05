@@ -1,49 +1,253 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Capture System v1</title>
-  <style>
-    body { font-family: Arial; padding: 10px; }
-    button { font-size: 18px; padding: 10px; margin: 5px; }
-    textarea { width: 100%; height: 80px; }
-    .box { margin-bottom: 15px; }
-    .recording { background: red; color: white; }
-  </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0a0a0a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>NoteCapture</title>
+  <link rel="stylesheet" href="styles.css" />
 </head>
-
 <body>
 
-<h2>Capture</h2>
+  <!-- ─── PASSCODE GATE ─────────────────────────────────────────── -->
+  <!-- Shown on first run or if passcode is not set -->
+  <div id="screen-passcode" class="screen active">
+    <div class="gate-wrap">
+      <div class="gate-logo">⬡</div>
+      <h1 class="gate-title">NoteCapture</h1>
+      <p class="gate-sub">Enter your Worker passcode to continue</p>
+      <input
+        id="passcode-input"
+        class="gate-input"
+        type="password"
+        placeholder="Passcode"
+        autocomplete="current-password"
+      />
+      <button id="passcode-submit" class="gate-btn">Unlock</button>
+      <p id="passcode-error" class="gate-error hidden">Incorrect passcode. Try again.</p>
+    </div>
+  </div>
 
-<div class="box">
-  Project:
-  <select id="project">
-    <option>Hotel</option>
-    <option>General</option>
-    <option>Ideas</option>
-  </select>
-</div>
+  <!-- ─── CAPTURE SCREEN ────────────────────────────────────────── -->
+  <!-- Main screen: mic button dominant, text secondary -->
+  <div id="screen-capture" class="screen">
 
-<div class="box">
-  <button id="micBtn">🎤 Hold / Tap to Record</button>
-</div>
+    <!-- Top bar: type badge + topic tag -->
+    <div class="topbar">
+      <button id="type-badge" class="badge-btn" title="Note type (AI picks, tap to override)">
+        <span id="type-label">auto</span>
+      </button>
+      <button id="topic-badge" class="badge-btn topic" title="Topic tag">
+        <span id="topic-label">+ topic</span>
+      </button>
+      <div class="topbar-right">
+        <span id="pending-count" class="pending-dot hidden" title="Notes pending sync">●</span>
+      </div>
+    </div>
 
-<div class="box">
-  <textarea id="textBox" placeholder="Your text will appear here..."></textarea>
-</div>
+    <!-- Mic button — dominates the screen -->
+    <div class="mic-zone">
+      <button id="mic-btn" class="mic-btn" aria-label="Tap to record">
+        <div class="mic-ring ring-outer"></div>
+        <div class="mic-ring ring-inner"></div>
+        <div class="mic-icon">
+          <!-- microphone SVG -->
+          <svg viewBox="0 0 40 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="12" y="2" width="16" height="26" rx="8" fill="currentColor"/>
+            <path d="M4 22c0 8.837 7.163 16 16 16s16-7.163 16-16" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+            <line x1="20" y1="38" x2="20" y2="46" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+            <line x1="12" y1="46" x2="28" y2="46" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+          </svg>
+        </div>
+      </button>
+      <p id="mic-status" class="mic-status">tap to record</p>
+    </div>
 
-<div class="box">
-  <button onclick="sendToAI()">Send to AI</button>
-</div>
+    <!-- Text input — secondary capture method -->
+    <div class="text-zone">
+      <textarea
+        id="text-input"
+        class="text-input"
+        placeholder="or type a note here…"
+        rows="3"
+        autocomplete="off"
+        spellcheck="true"
+      ></textarea>
+      <button id="text-submit" class="text-submit-btn" aria-label="Save note">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" width="20" height="20">
+          <path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
 
-<h3>Output</h3>
-<pre id="output"></pre>
+    <!-- Bottom nav -->
+    <nav class="bottomnav">
+      <button class="nav-btn active" data-screen="capture" aria-label="Capture">
+        <svg viewBox="0 0 24 24" fill="none" width="22" height="22"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>
+        <span>Capture</span>
+      </button>
+      <button class="nav-btn" data-screen="notes" aria-label="Notes">
+        <svg viewBox="0 0 24 24" fill="none" width="22" height="22"><rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" stroke-width="2"/><line x1="8" y1="9" x2="16" y2="9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="8" y1="13" x2="13" y2="13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span>Notes</span>
+      </button>
+      <button class="nav-btn" data-screen="settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" fill="none" width="22" height="22"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path d="M12 2v2M12 20v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M2 12h2M20 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span>Settings</span>
+      </button>
+    </nav>
+  </div>
 
-<h3>Saved (Local)</h3>
-<pre id="saved"></pre>
+  <!-- ─── NOTES LIST SCREEN ─────────────────────────────────────── -->
+  <div id="screen-notes" class="screen">
+    <div class="list-header">
+      <input id="search-input" class="search-input" type="search" placeholder="Search notes…" />
+      <div class="filter-tabs" id="filter-tabs">
+        <button class="filter-tab active" data-type="all">All</button>
+        <button class="filter-tab" data-type="todo">To-do</button>
+        <button class="filter-tab" data-type="reminder">Reminder</button>
+        <button class="filter-tab" data-type="schedule">Schedule</button>
+        <button class="filter-tab" data-type="idea">Idea</button>
+        <button class="filter-tab" data-type="research">Research</button>
+        <button class="filter-tab" data-type="note">Note</button>
+      </div>
+    </div>
 
-<script src="app.js"></script>
+    <div id="notes-list" class="notes-list">
+      <!-- Notes rendered by app.js -->
+    </div>
 
+    <nav class="bottomnav">
+      <button class="nav-btn" data-screen="capture">
+        <svg viewBox="0 0 24 24" fill="none" width="22" height="22"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>
+        <span>Capture</span>
+      </button>
+      <button class="nav-btn active" data-screen="notes">
+        <svg viewBox="0 0 24 24" fill="none" width="22" height="22"><rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" stroke-width="2"/><line x1="8" y1="9" x2="16" y2="9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="8" y1="13" x2="13" y2="13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span>Notes</span>
+      </button>
+      <button class="nav-btn" data-screen="settings">
+        <svg viewBox="0 0 24 24" fill="none" width="22" height="22"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path d="M12 2v2M12 20v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M2 12h2M20 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span>Settings</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- ─── NOTE DETAIL / EDIT MODAL ──────────────────────────────── -->
+  <!-- Slides up over any screen when a note is tapped -->
+  <div id="modal-note" class="modal hidden" role="dialog" aria-modal="true" aria-label="Note detail">
+    <div class="modal-backdrop" id="modal-backdrop"></div>
+    <div class="modal-sheet">
+      <div class="modal-handle"></div>
+
+      <!-- Type + topic row -->
+      <div class="modal-meta">
+        <select id="modal-type" class="modal-select">
+          <option value="todo">To-do</option>
+          <option value="reminder">Reminder</option>
+          <option value="schedule">Schedule</option>
+          <option value="idea">Idea</option>
+          <option value="research">Research</option>
+          <option value="note">Note</option>
+        </select>
+        <input id="modal-topic" class="modal-topic-input" type="text" placeholder="topic tag" />
+      </div>
+
+      <!-- Clarification banner — shown if AI flagged needs_context -->
+      <div id="clarification-banner" class="clarif-banner hidden">
+        <span class="clarif-icon">?</span>
+        <div class="clarif-body">
+          <p id="clarif-question" class="clarif-q"></p>
+          <textarea id="clarif-answer" class="clarif-input" placeholder="Add context here…" rows="2"></textarea>
+          <button id="clarif-submit" class="clarif-btn">Submit & reprocess</button>
+        </div>
+      </div>
+
+      <!-- Main editable fields -->
+      <textarea id="modal-cleaned" class="modal-textarea" placeholder="Note content…" rows="5"></textarea>
+      <input id="modal-summary" class="modal-summary-input" type="text" placeholder="Summary…" />
+
+      <!-- Dynamic fields (deadline, priority, location, etc.) -->
+      <div id="modal-fields" class="modal-fields"></div>
+
+      <!-- Timestamps -->
+      <p id="modal-timestamps" class="modal-timestamps"></p>
+
+      <!-- Actions -->
+      <div class="modal-actions">
+        <button id="modal-save" class="modal-save-btn">Save changes</button>
+        <button id="modal-delete" class="modal-delete-btn">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── SETTINGS SCREEN ───────────────────────────────────────── -->
+  <div id="screen-settings" class="screen">
+    <div class="settings-wrap">
+      <h2 class="settings-title">Settings</h2>
+
+      <section class="settings-section">
+        <h3 class="settings-label">Worker URL</h3>
+        <input id="setting-worker-url" class="settings-input" type="url" placeholder="https://your-worker.workers.dev" />
+        <p class="settings-hint">Your Cloudflare Worker endpoint</p>
+      </section>
+
+      <section class="settings-section">
+        <h3 class="settings-label">Passcode</h3>
+        <input id="setting-passcode" class="settings-input" type="password" placeholder="New passcode" />
+        <button id="setting-passcode-save" class="settings-btn">Update passcode</button>
+      </section>
+
+      <section class="settings-section">
+        <h3 class="settings-label">Pending queue</h3>
+        <p id="setting-pending-info" class="settings-hint"></p>
+        <button id="setting-retry-all" class="settings-btn">Retry all pending</button>
+      </section>
+
+      <section class="settings-section danger-zone">
+        <h3 class="settings-label">Danger zone</h3>
+        <button id="setting-clear-all" class="settings-btn danger">Clear all data</button>
+        <p class="settings-hint">Permanently deletes all notes and settings</p>
+      </section>
+    </div>
+
+    <nav class="bottomnav">
+      <button class="nav-btn" data-screen="capture">
+        <svg viewBox="0 0 24 24" fill="none" width="22" height="22"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>
+        <span>Capture</span>
+      </button>
+      <button class="nav-btn" data-screen="notes">
+        <svg viewBox="0 0 24 24" fill="none" width="22" height="22"><rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" stroke-width="2"/><line x1="8" y1="9" x2="16" y2="9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="8" y1="13" x2="13" y2="13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span>Notes</span>
+      </button>
+      <button class="nav-btn active" data-screen="settings">
+        <svg viewBox="0 0 24 24" fill="none" width="22" height="22"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path d="M12 2v2M12 20v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M2 12h2M20 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span>Settings</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- Toast notification (appears briefly for feedback) -->
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <!-- Type override picker (bottom sheet) -->
+  <div id="type-picker" class="type-picker hidden">
+    <div class="type-picker-backdrop" id="type-picker-backdrop"></div>
+    <div class="type-picker-sheet">
+      <p class="type-picker-title">Set note type</p>
+      <div class="type-picker-options" id="type-picker-options">
+        <button class="type-opt" data-type="auto">auto (AI decides)</button>
+        <button class="type-opt" data-type="todo">To-do</button>
+        <button class="type-opt" data-type="reminder">Reminder</button>
+        <button class="type-opt" data-type="schedule">Schedule</button>
+        <button class="type-opt" data-type="idea">Idea</button>
+        <button class="type-opt" data-type="research">Research</button>
+        <button class="type-opt" data-type="note">Note</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
 </body>
 </html>
