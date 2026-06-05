@@ -107,11 +107,8 @@ const Store = {
   /** Settings helpers */
   getPasscode()    { return localStorage.getItem(CONFIG.KEYS.PASSCODE) || ''; },
   setPasscode(v)   { localStorage.setItem(CONFIG.KEYS.PASSCODE, v); },
-  getWorkerUrl() {
-     const url = localStorage.getItem(CONFIG.KEYS.WORKER_URL) || '';
-     return url.replace(/\/$/, ''); // strip trailing slash
-   },
-  setWorkerUrl(v)  { localStorage.setItem(CONFIG.KEYS.WORKER_URL, v); },
+  getWorkerUrl()   { return (localStorage.getItem(CONFIG.KEYS.WORKER_URL) || '').replace(/\/$/, ''); },
+  setWorkerUrl(v)  { localStorage.setItem(CONFIG.KEYS.WORKER_URL, v.replace(/\/$/, '')); },
 
   /** Wipe everything */
   clearAll() {
@@ -181,7 +178,8 @@ const Capture = {
       status: 'raw', // raw | processing | done | needs_context
       input: {
         mode,               // 'voice' | 'text'
-        raw_text: '',
+        raw_text: '',       // typed text or transcript — updated when transcription arrives
+        original_text: '',  // ← set once at capture time, NEVER overwritten afterward
         audio_blob_key: null,
       },
       ai: {
@@ -218,6 +216,13 @@ const Capture = {
     if (!this.hasVoiceSupport()) {
       UI.setMicState('no-voice');
       UI.setMicStatus('voice not available — use text');
+      return;
+    }
+    // Block recording when offline — audio requires Groq Whisper (server-side)
+    // If offline, user should type instead. Audio blobs cannot be transcribed locally.
+    if (!navigator.onLine) {
+      UI.showToast('Offline — type your note instead', 'error');
+      UI.setMicStatus('offline — use text input');
       return;
     }
     try {
@@ -300,7 +305,8 @@ const Capture = {
     if (!text) return;
 
     const note = this.makeNote('text');
-    note.input.raw_text = text;
+    note.input.raw_text      = text;
+    note.input.original_text = text; // locked forever
     note.status = 'raw';
 
     Store.saveNote(note);
@@ -381,6 +387,14 @@ const Queue = {
       const data = await res.json();
 
       if (data.status === 'ok' && data.result) {
+        // Store transcript — but only set original_text once (first transcription)
+        if (data.result.transcript) {
+          note.input.raw_text = data.result.transcript;
+          if (!note.input.original_text) {
+            note.input.original_text = data.result.transcript; // locked after first set
+          }
+        }
+
         _applyAiResult(note, data.result);
         note.status = data.result.clarification_needed ? 'needs_context' : 'done';
         note.sync.pending = false;
@@ -391,11 +405,6 @@ const Queue = {
           localStorage.removeItem(note.input.audio_blob_key);
           note.input.audio_blob_key = null;
         }
-        // Store transcript if returned
-        if (data.result.transcript) {
-          note.input.raw_text = data.result.transcript;
-        }
-
         Store.saveNote(note);
         Store.removePending(note.id);
         UI.updatePendingBadge();
@@ -420,12 +429,21 @@ const Queue = {
   },
 
   /** Drain the pending queue — called on load and on interval */
-  async drainQueue() {
+  async drainQueue(resetRetries = false) {
     const pending = Store.getPending();
     if (!pending.length) return;
     // Process up to 3 at a time to avoid hammering quota
     const batch = pending.slice(0, 3);
     for (const id of batch) {
+      // If manual retry, reset retry count so stuck notes get another chance
+      if (resetRetries) {
+        const note = Store.getNote(id);
+        if (note) {
+          note.sync.retry_count = 0;
+          note.sync.last_error  = null;
+          Store.saveNote(note);
+        }
+      }
       await this.processNote(id);
     }
     UI.updatePendingBadge();
@@ -439,16 +457,33 @@ const Queue = {
   },
 };
 
-/** Apply AI result fields onto a note object (mutates note) */
+/** Apply AI result fields onto a note object (mutates note).
+ *  Only copies the exact fields we expect — ignores anything extra the AI adds. */
 function _applyAiResult(note, result) {
   note.ai.type               = result.type || 'note';
   note.ai.type_confidence    = result.type_confidence || 'high';
   note.ai.cleaned_text       = result.cleaned_text || note.input.raw_text;
   note.ai.summary            = result.summary || '';
   note.ai.topic              = result.topic || '';
-  note.ai.fields             = result.fields || {};
+  // Strip fields to only allowed keys for this type — no AI extras
+  note.ai.fields             = _sanitiseFields(result.type, result.fields || {});
   note.ai.clarification_needed   = !!result.clarification_needed;
   note.ai.clarification_question = result.clarification_question || null;
+}
+
+/** Strip AI fields to only the allowed keys for each note type.
+ *  Prevents AI from sneaking in sentiment/warning fields. */
+function _sanitiseFields(type, fields) {
+  const ALLOWED = {
+    todo:     ['action', 'priority'],
+    reminder: ['action', 'due_datetime'],
+    schedule: ['event_name', 'datetime', 'location'],
+    idea:     ['follow_up_question'],
+    research: ['follow_up_question'],
+    note:     [],
+  };
+  const allowed = ALLOWED[type] || [];
+  return Object.fromEntries(allowed.map(k => [k, fields[k] ?? '']));
 }
 
 /** Collect distinct topic strings from existing notes (for AI context) */
@@ -551,8 +586,14 @@ const Modal = {
     document.getElementById('modal-topic').value   = topic;
     document.getElementById('modal-cleaned').value = note.ai.cleaned_text || note.input.raw_text || '';
     document.getElementById('modal-summary').value = note.ai.summary || '';
+
+    // Show original capture text if different from cleaned (gives user full transparency)
+    const original = note.input.original_text || '';
+    const cleaned  = note.ai.cleaned_text || '';
+    const showOriginal = original && original !== cleaned;
     document.getElementById('modal-timestamps').textContent =
-      `created ${_relativeTime(note.created_at)}  ·  updated ${_relativeTime(note.updated_at)}`;
+      `created ${_relativeTime(note.created_at)}  ·  updated ${_relativeTime(note.updated_at)}`
+      + (showOriginal ? `\noriginal: "${original.slice(0, 120)}${original.length > 120 ? '…' : ''}"` : '');
 
     // Clarification banner
     const banner = document.getElementById('clarification-banner');
@@ -666,16 +707,29 @@ const Modal = {
 const Settings = {
   load() {
     document.getElementById('setting-worker-url').value = Store.getWorkerUrl();
-    const pending = Store.getPending().length;
-    document.getElementById('setting-pending-info').textContent =
-      `${pending} note${pending !== 1 ? 's' : ''} pending sync`;
+
+    // Show pending queue details including last errors
+    const pendingIds = Store.getPending();
+    const el = document.getElementById('setting-pending-info');
+    if (!pendingIds.length) {
+      el.textContent = 'No notes pending sync.';
+      return;
+    }
+    const details = pendingIds.map(id => {
+      const n = Store.getNote(id);
+      if (!n) return `${id}: not found`;
+      const err = n.sync.last_error ? ` — ${n.sync.last_error}` : '';
+      const retries = n.sync.retry_count ? ` (tried ${n.sync.retry_count}x)` : '';
+      return `${n.id.slice(0,8)}… retries:${n.sync.retry_count}${err}`;
+    });
+    el.innerHTML = `${pendingIds.length} pending:<br><small style="opacity:0.7">${details.join('<br>')}</small>`;
   },
 
   saveWorkerUrl() {
-     const url = document.getElementById('setting-worker-url').value.trim().replace(/\/$/, '');
-     Store.setWorkerUrl(url);
-     UI.showToast('Worker URL saved', 'ok');
-   },
+    const url = document.getElementById('setting-worker-url').value.trim();
+    Store.setWorkerUrl(url);
+    UI.showToast('Worker URL saved', 'ok');
+  },
 
   savePasscode() {
     const p = document.getElementById('setting-passcode').value.trim();
@@ -784,7 +838,13 @@ function init() {
   if (!Capture.hasVoiceSupport()) {
     UI.setMicState('no-voice');
     UI.setMicStatus('voice not supported — use text');
+  } else if (!navigator.onLine) {
+    UI.setMicStatus('offline — use text input');
   }
+
+  // Update mic label whenever online/offline state changes
+  window.addEventListener('online',  () => UI.setMicStatus('tap to record'));
+  window.addEventListener('offline', () => UI.setMicStatus('offline — use text input'));
 
   micBtn.addEventListener('click', () => {
     if (!Capture.hasVoiceSupport()) return;
@@ -851,15 +911,23 @@ function init() {
   document.getElementById('modal-delete').addEventListener('click',   () => Modal.delete());
   document.getElementById('clarif-submit').addEventListener('click',  () => Modal.submitClarification());
 
-  // Auto-save Worker URL when it changes
+  // Auto-save Worker URL when it changes — also retry pending notes
   document.getElementById('setting-worker-url').addEventListener('change', e => {
     Store.setWorkerUrl(e.target.value.trim());
+    UI.showToast('Worker URL saved — retrying pending…');
+    // Reset retry counts so notes stuck from earlier failures get another chance
+    Store.getPending().forEach(id => {
+      const note = Store.getNote(id);
+      if (note) { note.sync.retry_count = 0; note.sync.last_error = null; Store.saveNote(note); }
+    });
+    Queue.drainQueue(true);
+    setTimeout(() => Settings.load(), 1500);
   });
 
   // ── Settings actions
   document.getElementById('setting-passcode-save').addEventListener('click', () => Settings.savePasscode());
-  document.getElementById('setting-retry-all').addEventListener('click',     () => {
-    Queue.drainQueue();
+  document.getElementById('setting-retry-all').addEventListener('click', () => {
+    Queue.drainQueue(true); // true = reset retry counts so stuck notes get another chance
     UI.showToast('Retrying pending notes…');
   });
   document.getElementById('setting-clear-all').addEventListener('click', () => Settings.clearAll());
