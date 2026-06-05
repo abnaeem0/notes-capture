@@ -107,7 +107,10 @@ const Store = {
   /** Settings helpers */
   getPasscode()    { return localStorage.getItem(CONFIG.KEYS.PASSCODE) || ''; },
   setPasscode(v)   { localStorage.setItem(CONFIG.KEYS.PASSCODE, v); },
-  getWorkerUrl()   { return localStorage.getItem(CONFIG.KEYS.WORKER_URL) || ''; },
+  getWorkerUrl() {
+     const url = localStorage.getItem(CONFIG.KEYS.WORKER_URL) || '';
+     return url.replace(/\/$/, ''); // strip trailing slash
+   },
   setWorkerUrl(v)  { localStorage.setItem(CONFIG.KEYS.WORKER_URL, v); },
 
   /** Wipe everything */
@@ -669,10 +672,10 @@ const Settings = {
   },
 
   saveWorkerUrl() {
-    const url = document.getElementById('setting-worker-url').value.trim();
-    Store.setWorkerUrl(url);
-    UI.showToast('Worker URL saved', 'ok');
-  },
+     const url = document.getElementById('setting-worker-url').value.trim().replace(/\/$/, '');
+     Store.setWorkerUrl(url);
+     UI.showToast('Worker URL saved', 'ok');
+   },
 
   savePasscode() {
     const p = document.getElementById('setting-passcode').value.trim();
