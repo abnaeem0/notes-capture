@@ -218,12 +218,10 @@ const Capture = {
       UI.setMicStatus('voice not available — use text');
       return;
     }
-    // Block recording when offline — audio requires Groq Whisper (server-side)
-    // If offline, user should type instead. Audio blobs cannot be transcribed locally.
+    // Offline is allowed — blob is saved locally and synced when back online.
+    // We warn the user but do not block recording.
     if (!navigator.onLine) {
-      UI.showToast('Offline — type your note instead', 'error');
-      UI.setMicStatus('offline — use text input');
-      return;
+      UI.showToast('Offline — audio saved locally, will sync when connected', '');
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -386,6 +384,40 @@ const Queue = {
 
       const data = await res.json();
 
+      if (data.status === 'transcription_failed') {
+        // Audio blob transcription failed — keep blob in localStorage, retry later.
+        // Do NOT increment retry count — this is a transient failure (quota/network).
+        note.status = 'raw';
+        note.sync.last_error = `Transcription failed: ${data.error || 'unknown'}`;
+        Store.saveNote(note);
+        UI.showToast('Transcription failed — will retry', 'error');
+        return; // leave in pending queue
+      }
+
+      if (data.status === 'ai_failed') {
+        // AI structuring failed but we got a transcript back — save it as raw text.
+        // The note is still useful even without AI structuring.
+        if (data.transcript) {
+          note.input.raw_text = data.transcript;
+          if (!note.input.original_text) note.input.original_text = data.transcript;
+        }
+        note.status = 'raw';
+        note.sync.last_error = `AI failed: ${data.error || 'unknown'}`;
+        Store.saveNote(note);
+        UI.showToast('AI structuring failed — note saved as raw text', '');
+        // Leave in pending queue so AI retry happens later
+        return;
+      }
+
+      if (data.status === 'empty_input') {
+        // Nothing to transcribe — remove from queue, mark done
+        note.status = 'done';
+        note.sync.pending = false;
+        Store.saveNote(note);
+        Store.removePending(note.id);
+        return;
+      }
+
       if (data.status === 'ok' && data.result) {
         // Store transcript — but only set original_text once (first transcription)
         if (data.result.transcript) {
@@ -400,7 +432,7 @@ const Queue = {
         note.sync.pending = false;
         note.sync.last_error = null;
 
-        // Clean up stored audio blob once transcribed
+        // Clean up stored audio blob once transcribed successfully
         if (note.input.audio_blob_key) {
           localStorage.removeItem(note.input.audio_blob_key);
           note.input.audio_blob_key = null;
@@ -839,12 +871,15 @@ function init() {
     UI.setMicState('no-voice');
     UI.setMicStatus('voice not supported — use text');
   } else if (!navigator.onLine) {
-    UI.setMicStatus('offline — use text input');
+    UI.setMicStatus('offline — recording at your own risk');
   }
 
-  // Update mic label whenever online/offline state changes
-  window.addEventListener('online',  () => UI.setMicStatus('tap to record'));
-  window.addEventListener('offline', () => UI.setMicStatus('offline — use text input'));
+  // Update mic status when connectivity changes
+  window.addEventListener('online',  () => {
+    UI.setMicStatus('tap to record');
+    Queue.drainQueue(); // immediately retry pending notes
+  });
+  window.addEventListener('offline', () => UI.setMicStatus('offline — audio saves locally'));
 
   micBtn.addEventListener('click', () => {
     if (!Capture.hasVoiceSupport()) return;
