@@ -218,10 +218,12 @@ const Capture = {
       UI.setMicStatus('voice not available — use text');
       return;
     }
-    // Offline is allowed — blob is saved locally and synced when back online.
-    // We warn the user but do not block recording.
+    // Block recording when offline — audio requires Groq Whisper (server-side)
+    // If offline, user should type instead. Audio blobs cannot be transcribed locally.
     if (!navigator.onLine) {
-      UI.showToast('Offline — audio saved locally, will sync when connected', '');
+      UI.showToast('Offline — type your note instead', 'error');
+      UI.setMicStatus('offline — use text input');
+      return;
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -384,40 +386,6 @@ const Queue = {
 
       const data = await res.json();
 
-      if (data.status === 'transcription_failed') {
-        // Audio blob transcription failed — keep blob in localStorage, retry later.
-        // Do NOT increment retry count — this is a transient failure (quota/network).
-        note.status = 'raw';
-        note.sync.last_error = `Transcription failed: ${data.error || 'unknown'}`;
-        Store.saveNote(note);
-        UI.showToast('Transcription failed — will retry', 'error');
-        return; // leave in pending queue
-      }
-
-      if (data.status === 'ai_failed') {
-        // AI structuring failed but we got a transcript back — save it as raw text.
-        // The note is still useful even without AI structuring.
-        if (data.transcript) {
-          note.input.raw_text = data.transcript;
-          if (!note.input.original_text) note.input.original_text = data.transcript;
-        }
-        note.status = 'raw';
-        note.sync.last_error = `AI failed: ${data.error || 'unknown'}`;
-        Store.saveNote(note);
-        UI.showToast('AI structuring failed — note saved as raw text', '');
-        // Leave in pending queue so AI retry happens later
-        return;
-      }
-
-      if (data.status === 'empty_input') {
-        // Nothing to transcribe — remove from queue, mark done
-        note.status = 'done';
-        note.sync.pending = false;
-        Store.saveNote(note);
-        Store.removePending(note.id);
-        return;
-      }
-
       if (data.status === 'ok' && data.result) {
         // Store transcript — but only set original_text once (first transcription)
         if (data.result.transcript) {
@@ -432,7 +400,7 @@ const Queue = {
         note.sync.pending = false;
         note.sync.last_error = null;
 
-        // Clean up stored audio blob once transcribed successfully
+        // Clean up stored audio blob once transcribed
         if (note.input.audio_blob_key) {
           localStorage.removeItem(note.input.audio_blob_key);
           note.input.audio_blob_key = null;
@@ -734,6 +702,169 @@ const Modal = {
 };
 
 
+// ── 7b. DIAGNOSTICS ─────────────────────────────────────────────
+// Runs /diagnose on the Worker and renders results in the settings panel.
+// Each check shows ✓ (green), ✗ (red), or ○ (pending).
+
+const Diagnostics = {
+  async run() {
+    const workerUrl = Store.getWorkerUrl();
+    const passcode  = Store.getPasscode();
+    const panel     = document.getElementById('diag-panel');
+
+    panel.classList.remove('hidden');
+    document.getElementById('diag-summary').textContent = 'Running…';
+
+    // Reset all rows to pending state
+    const checks = ['worker', 'auth', 'groq-key', 'groq-model', 'groq-whisper', 'gemini'];
+    checks.forEach(k => {
+      document.getElementById(`diag-${k}-icon`).textContent   = '○';
+      document.getElementById(`diag-${k}-icon`).className     = 'diag-icon pending';
+      document.getElementById(`diag-${k}-detail`).textContent = 'checking…';
+    });
+
+    // ── Step 1: Do we have a Worker URL at all?
+    if (!workerUrl) {
+      this._setRow('worker', false, 'No Worker URL set — go to Settings and add it');
+      this._setRow('auth',         false, 'Skipped');
+      this._setRow('groq-key',     false, 'Skipped');
+      this._setRow('groq-model',   false, 'Skipped');
+      this._setRow('groq-whisper', false, 'Skipped');
+      this._setRow('gemini',       false, 'Skipped');
+      this._setSummary(false, 'Add your Worker URL in settings first.');
+      return;
+    }
+
+    // ── Step 2: Can we reach the Worker at all? (no passcode yet)
+    try {
+      const pingRes = await fetch(`${workerUrl}/ping`, { method: 'GET' });
+      if (pingRes.status === 404) {
+        this._setRow('worker', false, `Worker reached but /ping route missing — redeploy worker.js`);
+        this._abort();
+        return;
+      }
+      // 401 is expected here (no passcode header) — means Worker IS running
+      if (pingRes.status === 401 || pingRes.ok) {
+        this._setRow('worker', true, `Worker is reachable at ${workerUrl}`);
+      } else {
+        this._setRow('worker', false, `Unexpected response: HTTP ${pingRes.status}`);
+        this._abort();
+        return;
+      }
+    } catch (err) {
+      this._setRow('worker', false, `Cannot reach Worker: ${err.message} — check URL and that Worker is deployed`);
+      this._abort();
+      return;
+    }
+
+    // ── Step 3: Does the passcode work?
+    if (!passcode) {
+      this._setRow('auth', false, 'No passcode stored — enter your passcode on the lock screen');
+      this._abort();
+      return;
+    }
+    try {
+      const authRes = await fetch(`${workerUrl}/ping`, {
+        method: 'GET',
+        headers: { 'X-Passcode': passcode },
+      });
+      if (authRes.ok) {
+        this._setRow('auth', true, 'Passcode accepted by Worker');
+      } else if (authRes.status === 401) {
+        this._setRow('auth', false, 'Passcode rejected — update it in Settings to match your Worker PASSCODE variable');
+        this._abort();
+        return;
+      } else {
+        this._setRow('auth', false, `Unexpected auth response: HTTP ${authRes.status}`);
+        this._abort();
+        return;
+      }
+    } catch (err) {
+      this._setRow('auth', false, `Auth check failed: ${err.message}`);
+      this._abort();
+      return;
+    }
+
+    // ── Step 4: Run full /diagnose on Worker (checks Groq + Gemini)
+    try {
+      const diagRes = await fetch(`${workerUrl}/diagnose`, {
+        method: 'GET',
+        headers: { 'X-Passcode': passcode },
+      });
+
+      if (!diagRes.ok) {
+        const txt = await diagRes.text();
+        this._setRow('groq-key',     false, `Diagnose endpoint error: HTTP ${diagRes.status}`);
+        this._setRow('groq-model',   false, txt.slice(0, 120));
+        this._setRow('groq-whisper', false, 'Skipped');
+        this._setRow('gemini',       false, 'Skipped');
+        this._setSummary(false, 'Diagnose endpoint failed — make sure you deployed the latest worker.js.');
+        return;
+      }
+
+      const data = await diagRes.json();
+      const r    = data.results || {};
+
+      this._setRow('groq-key',     r.groq_key?.ok,     r.groq_key?.detail     || '—');
+      this._setRow('groq-model',   r.groq_model?.ok,   r.groq_model?.detail   || '—');
+      this._setRow('groq-whisper', r.groq_whisper?.ok, r.groq_whisper?.detail || '—');
+      this._setRow('gemini',       r.gemini?.ok,       r.gemini?.detail       || '—');
+
+      // Build summary
+      const allOk  = Object.values(r).every(v => v.ok);
+      const anyAi  = r.groq_model?.ok || r.gemini?.ok;
+      if (allOk) {
+        this._setSummary(true, 'Everything is working. If notes still fail, retry pending in queue.');
+      } else if (!r.groq_key?.ok) {
+        this._setSummary(false, 'Groq API key is missing or invalid — get a new key at console.groq.com and update GROQ_API_KEY in your Worker env vars.');
+      } else if (!r.groq_model?.ok && !r.gemini?.ok) {
+        this._setSummary(false, 'Both AI providers failed — check your API keys. Notes cannot be structured until at least one works.');
+      } else if (!r.groq_model?.ok) {
+        this._setSummary(false, 'Groq chat is failing but Gemini fallback works — notes will be structured via Gemini until Groq is fixed.');
+      } else if (!r.groq_whisper?.ok) {
+        this._setSummary(false, 'Voice transcription is failing — voice notes cannot be processed. Text notes will still work.');
+      } else {
+        this._setSummary(false, 'Some checks failed — see details above.');
+      }
+
+    } catch (err) {
+      this._setRow('groq-key',     false, `Could not reach /diagnose: ${err.message}`);
+      this._setRow('groq-model',   false, 'Skipped');
+      this._setRow('groq-whisper', false, 'Skipped');
+      this._setRow('gemini',       false, 'Skipped');
+      this._setSummary(false, 'Diagnose request failed — make sure the latest worker.js is deployed.');
+    }
+  },
+
+  _setRow(key, ok, detail) {
+    const icon   = document.getElementById(`diag-${key}-icon`);
+    const detEl  = document.getElementById(`diag-${key}-detail`);
+    icon.textContent = ok ? '✓' : '✗';
+    icon.className   = `diag-icon ${ok ? 'ok' : 'fail'}`;
+    detEl.textContent = detail;
+  },
+
+  _abort() {
+    // Mark all remaining unchecked rows as skipped
+    ['groq-key', 'groq-model', 'groq-whisper', 'gemini'].forEach(k => {
+      const icon = document.getElementById(`diag-${k}-icon`);
+      if (icon.textContent === '○') {
+        icon.textContent  = '—';
+        icon.className    = 'diag-icon pending';
+        document.getElementById(`diag-${k}-detail`).textContent = 'Skipped';
+      }
+    });
+    this._setSummary(false, 'Fix the issue above first, then run diagnostics again.');
+  },
+
+  _setSummary(ok, msg) {
+    const el = document.getElementById('diag-summary');
+    el.textContent = msg;
+    el.className   = `diag-summary ${ok ? 'ok' : 'fail'}`;
+  },
+};
+
+
 // ── 8. SETTINGS ──────────────────────────────────────────────────
 
 const Settings = {
@@ -871,15 +1002,12 @@ function init() {
     UI.setMicState('no-voice');
     UI.setMicStatus('voice not supported — use text');
   } else if (!navigator.onLine) {
-    UI.setMicStatus('offline — recording at your own risk');
+    UI.setMicStatus('offline — use text input');
   }
 
-  // Update mic status when connectivity changes
-  window.addEventListener('online',  () => {
-    UI.setMicStatus('tap to record');
-    Queue.drainQueue(); // immediately retry pending notes
-  });
-  window.addEventListener('offline', () => UI.setMicStatus('offline — audio saves locally'));
+  // Update mic label whenever online/offline state changes
+  window.addEventListener('online',  () => UI.setMicStatus('tap to record'));
+  window.addEventListener('offline', () => UI.setMicStatus('offline — use text input'));
 
   micBtn.addEventListener('click', () => {
     if (!Capture.hasVoiceSupport()) return;
@@ -966,6 +1094,7 @@ function init() {
     UI.showToast('Retrying pending notes…');
   });
   document.getElementById('setting-clear-all').addEventListener('click', () => Settings.clearAll());
+  document.getElementById('setting-diagnose').addEventListener('click',  () => Diagnostics.run());
 }
 
 /** Called once auth passes — start queues, update badges */
