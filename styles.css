@@ -1012,3 +1012,61 @@ a { color: var(--accent); }
 
 .diag-summary.ok   { background: rgba(80,200,120,0.08); color: var(--status-ok); }
 .diag-summary.fail { background: rgba(224,88,88,0.08);  color: var(--status-error); }
+
+/* ── AUDIO PLAYER IN MODAL ──────────────────────────────────────── */
+.modal-audio-wrap {
+  background: rgba(232,160,48,0.06);
+  border: 1px solid rgba(232,160,48,0.2);
+  border-radius: var(--radius-md);
+  padding: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.modal-audio-wrap.hidden { display: none; }
+
+.modal-audio-label {
+  font-family: var(--font-ui);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+}
+
+.modal-audio-player {
+  width: 100%;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  accent-color: var(--accent);
+}
+
+.modal-audio-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* ── PROMPT EDITOR IN SETTINGS ──────────────────────────────────── */
+.settings-prompt-textarea {
+  width: 100%;
+  padding: 0.75rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--bg-hover);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  resize: vertical;
+  min-height: 200px;
+  transition: border-color var(--transition);
+}
+
+.settings-prompt-textarea:focus { border-color: var(--accent); }
+.settings-prompt-textarea::placeholder { color: var(--text-muted); opacity: 0.7; }
+
+.settings-prompt-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
