@@ -164,6 +164,13 @@
         </div>
       </div>
 
+      <!-- Audio player — visible only for unprocessed voice notes with saved blob -->
+      <div id="modal-audio-wrap" class="modal-audio-wrap hidden">
+        <p class="modal-audio-label">🎙 Saved audio (not yet transcribed)</p>
+        <audio id="modal-audio-player" class="modal-audio-player" controls></audio>
+        <p class="modal-audio-hint">You can play this, then type the content below and save manually.</p>
+      </div>
+
       <!-- Main editable fields -->
       <textarea id="modal-cleaned" class="modal-textarea" placeholder="Note content…" rows="5"></textarea>
       <input id="modal-summary" class="modal-summary-input" type="text" placeholder="Summary…" />
@@ -205,72 +212,22 @@
         <button id="setting-retry-all" class="settings-btn">Retry all pending</button>
       </section>
 
-      <!-- ── DIAGNOSTICS ── Run this when something isn't working -->
+      <!-- Prompt editor — shows active prompt, allows override -->
       <section class="settings-section">
-        <h3 class="settings-label">Diagnostics</h3>
-        <p class="settings-hint">Tests each part of the pipeline and shows exactly what's failing.</p>
-        <button id="setting-diagnose" class="settings-btn">Run diagnostics</button>
-
-        <!-- Results panel — hidden until run -->
-        <div id="diag-panel" class="diag-panel hidden">
-
-          <!-- Each check row: icon + label + detail -->
-          <div class="diag-row" id="diag-worker">
-            <span class="diag-icon" id="diag-worker-icon">○</span>
-            <div class="diag-body">
-              <span class="diag-label">Worker reachable</span>
-              <span class="diag-detail" id="diag-worker-detail">—</span>
-            </div>
-          </div>
-
-          <div class="diag-row" id="diag-auth">
-            <span class="diag-icon" id="diag-auth-icon">○</span>
-            <div class="diag-body">
-              <span class="diag-label">Passcode accepted</span>
-              <span class="diag-detail" id="diag-auth-detail">—</span>
-            </div>
-          </div>
-
-          <div class="diag-row" id="diag-groq-key">
-            <span class="diag-icon" id="diag-groq-key-icon">○</span>
-            <div class="diag-body">
-              <span class="diag-label">Groq API key valid</span>
-              <span class="diag-detail" id="diag-groq-key-detail">—</span>
-            </div>
-          </div>
-
-          <div class="diag-row" id="diag-groq-model">
-            <span class="diag-icon" id="diag-groq-model-icon">○</span>
-            <div class="diag-body">
-              <span class="diag-label">Groq model responds</span>
-              <span class="diag-detail" id="diag-groq-model-detail">—</span>
-            </div>
-          </div>
-
-          <div class="diag-row" id="diag-groq-whisper">
-            <span class="diag-icon" id="diag-groq-whisper-icon">○</span>
-            <div class="diag-body">
-              <span class="diag-label">Groq Whisper (STT)</span>
-              <span class="diag-detail" id="diag-groq-whisper-detail">—</span>
-            </div>
-          </div>
-
-          <div class="diag-row" id="diag-gemini">
-            <span class="diag-icon" id="diag-gemini-icon">○</span>
-            <div class="diag-body">
-              <span class="diag-label">Gemini fallback</span>
-              <span class="diag-detail" id="diag-gemini-detail">—</span>
-            </div>
-          </div>
-
-          <p id="diag-summary" class="diag-summary"></p>
+        <h3 class="settings-label">AI Prompt</h3>
+        <p class="settings-hint" id="setting-prompt-status">Loading…</p>
+        <textarea
+          id="setting-prompt"
+          class="settings-prompt-textarea"
+          placeholder="Loading default prompt from Worker… Leave empty to use Worker default."
+          rows="12"
+          spellcheck="false"
+        ></textarea>
+        <div class="settings-prompt-actions">
+          <button id="setting-prompt-save"  class="settings-btn">Save custom prompt</button>
+          <button id="setting-prompt-reset" class="settings-btn">Reset to default</button>
         </div>
-      </section>
-
-      <section class="settings-section">
-        <h3 class="settings-label">Pending queue</h3>
-        <p id="setting-pending-info" class="settings-hint"></p>
-        <button id="setting-retry-all" class="settings-btn">Retry all pending</button>
+        <p class="settings-hint">Edit and save to override the AI behaviour. Reset to go back to the Worker default. Changes apply to all new notes immediately.</p>
       </section>
 
       <section class="settings-section danger-zone">
