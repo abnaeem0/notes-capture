@@ -21,11 +21,12 @@
 const CONFIG = {
   // localStorage keys
   KEYS: {
-    NOTES:       'nc_notes',        // array of all note objects
-    PASSCODE:    'nc_passcode',     // stored passcode string
-    WORKER_URL:  'nc_worker_url',   // Cloudflare Worker endpoint
-    PENDING:     'nc_pending',      // array of note IDs awaiting processing
-    CAPTURE_TYPE:'nc_capture_type', // last chosen capture type override
+    NOTES:         'nc_notes',        // array of all note objects
+    PASSCODE:      'nc_passcode',     // stored passcode string
+    WORKER_URL:    'nc_worker_url',   // Cloudflare Worker endpoint
+    PENDING:       'nc_pending',      // array of note IDs awaiting processing
+    CAPTURE_TYPE:  'nc_capture_type', // last chosen capture type override
+    CUSTOM_PROMPT: 'nc_custom_prompt',// optional prompt override (set in Settings)
   },
 
   // How often the retry queue runs (ms)
@@ -109,6 +110,9 @@ const Store = {
   setPasscode(v)   { localStorage.setItem(CONFIG.KEYS.PASSCODE, v); },
   getWorkerUrl()   { return (localStorage.getItem(CONFIG.KEYS.WORKER_URL) || '').replace(/\/$/, ''); },
   setWorkerUrl(v)  { localStorage.setItem(CONFIG.KEYS.WORKER_URL, v.replace(/\/$/, '')); },
+
+  getCustomPrompt()  { return localStorage.getItem(CONFIG.KEYS.CUSTOM_PROMPT) || ''; },
+  setCustomPrompt(v) { localStorage.setItem(CONFIG.KEYS.CUSTOM_PROMPT, v); },
 
   /** Wipe everything */
   clearAll() {
@@ -359,6 +363,8 @@ const Queue = {
         type_hint: note.user.type_override || null,
         existing_topics: _getExistingTopics(),
         clarification_answer: note.ai.clarification_answer || null,
+        // Send custom prompt if set — Worker uses it instead of hardcoded default
+        custom_prompt: Store.getCustomPrompt() || null,
       };
 
       // Attach audio if present
@@ -605,6 +611,23 @@ const Modal = {
       banner.classList.add('hidden');
     }
 
+    // Audio player — show if note has a saved audio blob (unprocessed voice note)
+    const audioEl = document.getElementById('modal-audio-player');
+    if (note.input.audio_blob_key) {
+      const base64 = localStorage.getItem(note.input.audio_blob_key);
+      if (base64) {
+        // Detect format from base64 header bytes (Safari=mp4, Chrome=webm)
+        const isMp4 = base64.startsWith('/w') || base64.startsWith('AAAA');
+        const mime  = isMp4 ? 'audio/mp4' : 'audio/webm';
+        audioEl.src = `data:${mime};base64,${base64}`;
+        audioEl.parentElement.classList.remove('hidden');
+      } else {
+        audioEl.parentElement.classList.add('hidden');
+      }
+    } else {
+      audioEl.parentElement.classList.add('hidden');
+    }
+
     // Dynamic type-specific fields
     this._renderFields(note);
 
@@ -702,169 +725,6 @@ const Modal = {
 };
 
 
-// ── 7b. DIAGNOSTICS ─────────────────────────────────────────────
-// Runs /diagnose on the Worker and renders results in the settings panel.
-// Each check shows ✓ (green), ✗ (red), or ○ (pending).
-
-const Diagnostics = {
-  async run() {
-    const workerUrl = Store.getWorkerUrl();
-    const passcode  = Store.getPasscode();
-    const panel     = document.getElementById('diag-panel');
-
-    panel.classList.remove('hidden');
-    document.getElementById('diag-summary').textContent = 'Running…';
-
-    // Reset all rows to pending state
-    const checks = ['worker', 'auth', 'groq-key', 'groq-model', 'groq-whisper', 'gemini'];
-    checks.forEach(k => {
-      document.getElementById(`diag-${k}-icon`).textContent   = '○';
-      document.getElementById(`diag-${k}-icon`).className     = 'diag-icon pending';
-      document.getElementById(`diag-${k}-detail`).textContent = 'checking…';
-    });
-
-    // ── Step 1: Do we have a Worker URL at all?
-    if (!workerUrl) {
-      this._setRow('worker', false, 'No Worker URL set — go to Settings and add it');
-      this._setRow('auth',         false, 'Skipped');
-      this._setRow('groq-key',     false, 'Skipped');
-      this._setRow('groq-model',   false, 'Skipped');
-      this._setRow('groq-whisper', false, 'Skipped');
-      this._setRow('gemini',       false, 'Skipped');
-      this._setSummary(false, 'Add your Worker URL in settings first.');
-      return;
-    }
-
-    // ── Step 2: Can we reach the Worker at all? (no passcode yet)
-    try {
-      const pingRes = await fetch(`${workerUrl}/ping`, { method: 'GET' });
-      if (pingRes.status === 404) {
-        this._setRow('worker', false, `Worker reached but /ping route missing — redeploy worker.js`);
-        this._abort();
-        return;
-      }
-      // 401 is expected here (no passcode header) — means Worker IS running
-      if (pingRes.status === 401 || pingRes.ok) {
-        this._setRow('worker', true, `Worker is reachable at ${workerUrl}`);
-      } else {
-        this._setRow('worker', false, `Unexpected response: HTTP ${pingRes.status}`);
-        this._abort();
-        return;
-      }
-    } catch (err) {
-      this._setRow('worker', false, `Cannot reach Worker: ${err.message} — check URL and that Worker is deployed`);
-      this._abort();
-      return;
-    }
-
-    // ── Step 3: Does the passcode work?
-    if (!passcode) {
-      this._setRow('auth', false, 'No passcode stored — enter your passcode on the lock screen');
-      this._abort();
-      return;
-    }
-    try {
-      const authRes = await fetch(`${workerUrl}/ping`, {
-        method: 'GET',
-        headers: { 'X-Passcode': passcode },
-      });
-      if (authRes.ok) {
-        this._setRow('auth', true, 'Passcode accepted by Worker');
-      } else if (authRes.status === 401) {
-        this._setRow('auth', false, 'Passcode rejected — update it in Settings to match your Worker PASSCODE variable');
-        this._abort();
-        return;
-      } else {
-        this._setRow('auth', false, `Unexpected auth response: HTTP ${authRes.status}`);
-        this._abort();
-        return;
-      }
-    } catch (err) {
-      this._setRow('auth', false, `Auth check failed: ${err.message}`);
-      this._abort();
-      return;
-    }
-
-    // ── Step 4: Run full /diagnose on Worker (checks Groq + Gemini)
-    try {
-      const diagRes = await fetch(`${workerUrl}/diagnose`, {
-        method: 'GET',
-        headers: { 'X-Passcode': passcode },
-      });
-
-      if (!diagRes.ok) {
-        const txt = await diagRes.text();
-        this._setRow('groq-key',     false, `Diagnose endpoint error: HTTP ${diagRes.status}`);
-        this._setRow('groq-model',   false, txt.slice(0, 120));
-        this._setRow('groq-whisper', false, 'Skipped');
-        this._setRow('gemini',       false, 'Skipped');
-        this._setSummary(false, 'Diagnose endpoint failed — make sure you deployed the latest worker.js.');
-        return;
-      }
-
-      const data = await diagRes.json();
-      const r    = data.results || {};
-
-      this._setRow('groq-key',     r.groq_key?.ok,     r.groq_key?.detail     || '—');
-      this._setRow('groq-model',   r.groq_model?.ok,   r.groq_model?.detail   || '—');
-      this._setRow('groq-whisper', r.groq_whisper?.ok, r.groq_whisper?.detail || '—');
-      this._setRow('gemini',       r.gemini?.ok,       r.gemini?.detail       || '—');
-
-      // Build summary
-      const allOk  = Object.values(r).every(v => v.ok);
-      const anyAi  = r.groq_model?.ok || r.gemini?.ok;
-      if (allOk) {
-        this._setSummary(true, 'Everything is working. If notes still fail, retry pending in queue.');
-      } else if (!r.groq_key?.ok) {
-        this._setSummary(false, 'Groq API key is missing or invalid — get a new key at console.groq.com and update GROQ_API_KEY in your Worker env vars.');
-      } else if (!r.groq_model?.ok && !r.gemini?.ok) {
-        this._setSummary(false, 'Both AI providers failed — check your API keys. Notes cannot be structured until at least one works.');
-      } else if (!r.groq_model?.ok) {
-        this._setSummary(false, 'Groq chat is failing but Gemini fallback works — notes will be structured via Gemini until Groq is fixed.');
-      } else if (!r.groq_whisper?.ok) {
-        this._setSummary(false, 'Voice transcription is failing — voice notes cannot be processed. Text notes will still work.');
-      } else {
-        this._setSummary(false, 'Some checks failed — see details above.');
-      }
-
-    } catch (err) {
-      this._setRow('groq-key',     false, `Could not reach /diagnose: ${err.message}`);
-      this._setRow('groq-model',   false, 'Skipped');
-      this._setRow('groq-whisper', false, 'Skipped');
-      this._setRow('gemini',       false, 'Skipped');
-      this._setSummary(false, 'Diagnose request failed — make sure the latest worker.js is deployed.');
-    }
-  },
-
-  _setRow(key, ok, detail) {
-    const icon   = document.getElementById(`diag-${key}-icon`);
-    const detEl  = document.getElementById(`diag-${key}-detail`);
-    icon.textContent = ok ? '✓' : '✗';
-    icon.className   = `diag-icon ${ok ? 'ok' : 'fail'}`;
-    detEl.textContent = detail;
-  },
-
-  _abort() {
-    // Mark all remaining unchecked rows as skipped
-    ['groq-key', 'groq-model', 'groq-whisper', 'gemini'].forEach(k => {
-      const icon = document.getElementById(`diag-${k}-icon`);
-      if (icon.textContent === '○') {
-        icon.textContent  = '—';
-        icon.className    = 'diag-icon pending';
-        document.getElementById(`diag-${k}-detail`).textContent = 'Skipped';
-      }
-    });
-    this._setSummary(false, 'Fix the issue above first, then run diagnostics again.');
-  },
-
-  _setSummary(ok, msg) {
-    const el = document.getElementById('diag-summary');
-    el.textContent = msg;
-    el.className   = `diag-summary ${ok ? 'ok' : 'fail'}`;
-  },
-};
-
-
 // ── 8. SETTINGS ──────────────────────────────────────────────────
 
 const Settings = {
@@ -906,6 +766,51 @@ const Settings = {
     if (!confirm('Delete ALL notes and settings? This cannot be undone.')) return;
     Store.clearAll();
     location.reload();
+  },
+
+  /** Load prompt textarea — fetches default from Worker if none set locally */
+  async loadPrompt() {
+    const ta = document.getElementById('setting-prompt');
+    if (!ta) return;
+    const saved = Store.getCustomPrompt();
+    if (saved) {
+      ta.value = saved;
+      document.getElementById('setting-prompt-status').textContent = 'Custom prompt active — overrides Worker default.';
+    } else {
+      ta.value = '';
+      ta.placeholder = 'Loading default prompt from Worker…';
+      // Fetch default prompt from /diagnose
+      const url      = Store.getWorkerUrl();
+      const passcode = Store.getPasscode();
+      if (url && passcode) {
+        try {
+          const res  = await fetch(`${url}/diagnose`, { headers: { 'X-Passcode': passcode } });
+          const data = await res.json();
+          if (data.defaultPrompt) {
+            ta.placeholder = data.defaultPrompt;
+            document.getElementById('setting-prompt-status').textContent = 'Showing Worker default prompt (read-only). Edit below to override.';
+          }
+        } catch {
+          ta.placeholder = '(Could not load default — check Worker URL and passcode)';
+        }
+      } else {
+        ta.placeholder = '(Set Worker URL and passcode first to load default)';
+      }
+      document.getElementById('setting-prompt-status').textContent = 'Using Worker default prompt.';
+    }
+  },
+
+  savePrompt() {
+    const val = document.getElementById('setting-prompt').value.trim();
+    Store.setCustomPrompt(val);
+    const status = document.getElementById('setting-prompt-status');
+    if (val) {
+      status.textContent = 'Custom prompt saved — will be used for all new notes.';
+      UI.showToast('Custom prompt saved', 'ok');
+    } else {
+      status.textContent = 'Cleared — Worker default prompt will be used.';
+      UI.showToast('Prompt reset to default', 'ok');
+    }
   },
 };
 
@@ -957,7 +862,7 @@ const UI = {
 
     // Side effects per screen
     if (name === 'notes')    Render.renderNotesList();
-    if (name === 'settings') Settings.load();
+    if (name === 'settings') { Settings.load(); Settings.loadPrompt(); }
   },
 };
 
@@ -1093,8 +998,13 @@ function init() {
     Queue.drainQueue(true); // true = reset retry counts so stuck notes get another chance
     UI.showToast('Retrying pending notes…');
   });
-  document.getElementById('setting-clear-all').addEventListener('click', () => Settings.clearAll());
-  document.getElementById('setting-diagnose').addEventListener('click',  () => Diagnostics.run());
+  document.getElementById('setting-clear-all').addEventListener('click',   () => Settings.clearAll());
+  document.getElementById('setting-prompt-save').addEventListener('click',  () => Settings.savePrompt());
+  document.getElementById('setting-prompt-reset').addEventListener('click', () => {
+    document.getElementById('setting-prompt').value = '';
+    Settings.savePrompt();
+    Settings.loadPrompt();
+  });
 }
 
 /** Called once auth passes — start queues, update badges */
