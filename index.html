@@ -167,8 +167,19 @@
       <!-- Audio player — visible only for unprocessed voice notes with saved blob -->
       <div id="modal-audio-wrap" class="modal-audio-wrap hidden">
         <p class="modal-audio-label">🎙 Saved audio (not yet transcribed)</p>
-        <audio id="modal-audio-player" class="modal-audio-player" controls></audio>
-        <p class="modal-audio-hint">You can play this, then type the content below and save manually.</p>
+        <!-- preload=auto buffers the full blob so scrubbing is smooth -->
+        <audio id="modal-audio-player" class="modal-audio-player" controls preload="auto"></audio>
+        <div class="modal-audio-progress">
+          <span id="modal-audio-time" class="modal-audio-time">0:00</span>
+          <input
+            id="modal-audio-seek"
+            class="modal-audio-seek"
+            type="range"
+            min="0" max="100" value="0" step="0.1"
+          />
+          <span id="modal-audio-duration" class="modal-audio-duration">0:00</span>
+        </div>
+        <p class="modal-audio-hint">Play back, then type what you said below and save manually.</p>
       </div>
 
       <!-- Main editable fields -->
@@ -228,6 +239,59 @@
           <button id="setting-prompt-reset" class="settings-btn">Reset to default</button>
         </div>
         <p class="settings-hint">Edit and save to override the AI behaviour. Reset to go back to the Worker default. Changes apply to all new notes immediately.</p>
+      </section>
+
+      <!-- ── DIAGNOSTICS ── Tests each part of the pipeline ── -->
+      <section class="settings-section">
+        <h3 class="settings-label">Diagnostics</h3>
+        <p class="settings-hint">Tests Worker, passcode, Groq, Whisper and Gemini. Run this when something isn't working.</p>
+        <button id="setting-diagnose" class="settings-btn">Run diagnostics</button>
+
+        <div id="diag-panel" class="diag-panel hidden">
+          <div class="diag-row" id="diag-worker">
+            <span class="diag-icon" id="diag-worker-icon">○</span>
+            <div class="diag-body">
+              <span class="diag-label">Worker reachable</span>
+              <span class="diag-detail" id="diag-worker-detail">—</span>
+            </div>
+          </div>
+          <div class="diag-row" id="diag-auth">
+            <span class="diag-icon" id="diag-auth-icon">○</span>
+            <div class="diag-body">
+              <span class="diag-label">Passcode accepted</span>
+              <span class="diag-detail" id="diag-auth-detail">—</span>
+            </div>
+          </div>
+          <div class="diag-row" id="diag-groq-key">
+            <span class="diag-icon" id="diag-groq-key-icon">○</span>
+            <div class="diag-body">
+              <span class="diag-label">Groq API key valid</span>
+              <span class="diag-detail" id="diag-groq-key-detail">—</span>
+            </div>
+          </div>
+          <div class="diag-row" id="diag-groq-model">
+            <span class="diag-icon" id="diag-groq-model-icon">○</span>
+            <div class="diag-body">
+              <span class="diag-label">Groq model responds</span>
+              <span class="diag-detail" id="diag-groq-model-detail">—</span>
+            </div>
+          </div>
+          <div class="diag-row" id="diag-groq-whisper">
+            <span class="diag-icon" id="diag-groq-whisper-icon">○</span>
+            <div class="diag-body">
+              <span class="diag-label">Groq Whisper (STT)</span>
+              <span class="diag-detail" id="diag-groq-whisper-detail">—</span>
+            </div>
+          </div>
+          <div class="diag-row" id="diag-gemini">
+            <span class="diag-icon" id="diag-gemini-icon">○</span>
+            <div class="diag-body">
+              <span class="diag-label">Gemini fallback</span>
+              <span class="diag-detail" id="diag-gemini-detail">—</span>
+            </div>
+          </div>
+          <p id="diag-summary" class="diag-summary"></p>
+        </div>
       </section>
 
       <section class="settings-section danger-zone">
