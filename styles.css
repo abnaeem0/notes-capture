@@ -1070,3 +1070,125 @@ a { color: var(--accent); }
   gap: 0.5rem;
   flex-wrap: wrap;
 }
+
+/* ── AUDIO PLAYER — SMOOTH SEEK BAR ────────────────────────────── */
+.modal-audio-wrap {
+  background: rgba(232,160,48,0.06);
+  border: 1px solid rgba(232,160,48,0.2);
+  border-radius: var(--radius-md);
+  padding: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.modal-audio-wrap.hidden { display: none; }
+.modal-audio-label {
+  font-family: var(--font-ui);
+  font-size: 0.75rem;
+  color: var(--accent);
+}
+/* Hide the native audio controls — we use our own seek bar */
+.modal-audio-player {
+  width: 100%;
+  height: 36px;
+  accent-color: var(--accent);
+  border-radius: var(--radius-sm);
+}
+.modal-audio-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.modal-audio-time,
+.modal-audio-duration {
+  font-family: var(--font-ui);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  width: 32px;
+  flex-shrink: 0;
+}
+.modal-audio-duration { text-align: right; }
+.modal-audio-seek {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-hover);
+  outline: none;
+  cursor: pointer;
+}
+.modal-audio-seek::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+.modal-audio-seek::-webkit-slider-thumb:active { transform: scale(1.3); }
+.modal-audio-seek::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+  cursor: pointer;
+}
+.modal-audio-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* ── DIAGNOSTICS PANEL ──────────────────────────────────────────── */
+.diag-panel {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.diag-panel.hidden { display: none; }
+.diag-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  padding: 0.55rem 0.75rem;
+  background: var(--bg-raised);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--bg-hover);
+}
+.diag-icon {
+  font-size: 0.85rem;
+  width: 16px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  font-family: var(--font-ui);
+}
+.diag-icon.ok      { color: var(--status-ok); }
+.diag-icon.fail    { color: var(--status-error); }
+.diag-icon.pending { color: var(--text-muted); }
+.diag-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.diag-label {
+  font-family: var(--font-ui);
+  font-size: 0.72rem;
+  letter-spacing: 0.03em;
+  color: var(--text-primary);
+}
+.diag-detail {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  word-break: break-word;
+}
+.diag-summary {
+  margin-top: 0.35rem;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  padding: 0.6rem 0.75rem;
+  border-radius: var(--radius-sm);
+}
+.diag-summary.ok   { background: rgba(80,200,120,0.08); color: var(--status-ok); }
+.diag-summary.fail { background: rgba(224,88,88,0.08);  color: var(--status-error); }
