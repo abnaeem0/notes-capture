@@ -21,12 +21,11 @@
 const CONFIG = {
   // localStorage keys
   KEYS: {
-    NOTES:         'nc_notes',        // array of all note objects
-    PASSCODE:      'nc_passcode',     // stored passcode string
-    WORKER_URL:    'nc_worker_url',   // Cloudflare Worker endpoint
-    PENDING:       'nc_pending',      // array of note IDs awaiting processing
-    CAPTURE_TYPE:  'nc_capture_type', // last chosen capture type override
-    CUSTOM_PROMPT: 'nc_custom_prompt',// optional prompt override (set in Settings)
+    NOTES:       'nc_notes',        // array of all note objects
+    PASSCODE:    'nc_passcode',     // stored passcode string
+    WORKER_URL:  'nc_worker_url',   // Cloudflare Worker endpoint
+    PENDING:     'nc_pending',      // array of note IDs awaiting processing
+    CAPTURE_TYPE:'nc_capture_type', // last chosen capture type override
   },
 
   // How often the retry queue runs (ms)
@@ -110,9 +109,6 @@ const Store = {
   setPasscode(v)   { localStorage.setItem(CONFIG.KEYS.PASSCODE, v); },
   getWorkerUrl()   { return (localStorage.getItem(CONFIG.KEYS.WORKER_URL) || '').replace(/\/$/, ''); },
   setWorkerUrl(v)  { localStorage.setItem(CONFIG.KEYS.WORKER_URL, v.replace(/\/$/, '')); },
-
-  getCustomPrompt()  { return localStorage.getItem(CONFIG.KEYS.CUSTOM_PROMPT) || ''; },
-  setCustomPrompt(v) { localStorage.setItem(CONFIG.KEYS.CUSTOM_PROMPT, v); },
 
   /** Wipe everything */
   clearAll() {
@@ -363,8 +359,6 @@ const Queue = {
         type_hint: note.user.type_override || null,
         existing_topics: _getExistingTopics(),
         clarification_answer: note.ai.clarification_answer || null,
-        // Send custom prompt if set — Worker uses it instead of hardcoded default
-        custom_prompt: Store.getCustomPrompt() || null,
       };
 
       // Attach audio if present
@@ -611,21 +605,17 @@ const Modal = {
       banner.classList.add('hidden');
     }
 
-    // Audio player — show if note has a saved audio blob (unprocessed voice note)
-    const audioEl = document.getElementById('modal-audio-player');
+    // Audio player — show if note has a saved audio blob
     if (note.input.audio_blob_key) {
       const base64 = localStorage.getItem(note.input.audio_blob_key);
       if (base64) {
-        // Detect format from base64 header bytes (Safari=mp4, Chrome=webm)
         const isMp4 = base64.startsWith('/w') || base64.startsWith('AAAA');
-        const mime  = isMp4 ? 'audio/mp4' : 'audio/webm';
-        audioEl.src = `data:${mime};base64,${base64}`;
-        audioEl.parentElement.classList.remove('hidden');
+        AudioPlayer.load(base64, isMp4 ? 'audio/mp4' : 'audio/webm');
       } else {
-        audioEl.parentElement.classList.add('hidden');
+        AudioPlayer.hide();
       }
     } else {
-      audioEl.parentElement.classList.add('hidden');
+      AudioPlayer.hide();
     }
 
     // Dynamic type-specific fields
@@ -638,6 +628,7 @@ const Modal = {
 
   close() {
     this.currentId = null;
+    AudioPlayer.hide(); // stop audio when modal closes
     document.getElementById('modal-note').classList.add('hidden');
     document.body.style.overflow = '';
   },
@@ -727,6 +718,251 @@ const Modal = {
 
 // ── 8. SETTINGS ──────────────────────────────────────────────────
 
+// ── AUDIO PLAYER CONTROLLER ─────────────────────────────────────
+// Wires up the custom seek bar in the modal for smooth scrubbing.
+// The native <audio> seek is jumpy on base64 blobs because the browser
+// can't determine duration until the whole blob is loaded.
+// We force-load the full blob and drive the seek bar ourselves.
+
+const AudioPlayer = {
+  audio: null,
+  seekEl: null,
+  timeEl: null,
+  durEl:  null,
+  rafId:  null,
+
+  /** Call this after setting audio.src — wires up smooth seek bar */
+  init() {
+    this.audio   = document.getElementById('modal-audio-player');
+    this.seekEl  = document.getElementById('modal-audio-seek');
+    this.timeEl  = document.getElementById('modal-audio-time');
+    this.durEl   = document.getElementById('modal-audio-duration');
+
+    if (!this.audio || !this.seekEl) return;
+
+    // Remove old listeners by cloning — cleanest way to reset
+    const newAudio = this.audio.cloneNode(true);
+    this.audio.parentNode.replaceChild(newAudio, this.audio);
+    this.audio = newAudio;
+
+    // preload=auto makes the browser buffer the whole blob up front
+    this.audio.preload = 'auto';
+
+    this.audio.addEventListener('loadedmetadata', () => {
+      if (isFinite(this.audio.duration)) {
+        this.durEl.textContent = _fmtTime(this.audio.duration);
+        this.seekEl.max = this.audio.duration;
+      }
+    });
+
+    // Some browsers (Safari) don't fire loadedmetadata on blob URLs.
+    // Poll duration until it's available.
+    const waitForDuration = setInterval(() => {
+      if (this.audio.duration && isFinite(this.audio.duration)) {
+        this.durEl.textContent = _fmtTime(this.audio.duration);
+        this.seekEl.max = this.audio.duration;
+        clearInterval(waitForDuration);
+      }
+    }, 200);
+
+    this.audio.addEventListener('timeupdate', () => {
+      if (!this.seekEl.dragging) {
+        this.seekEl.value = this.audio.currentTime;
+        this.timeEl.textContent = _fmtTime(this.audio.currentTime);
+      }
+    });
+
+    // Smooth scrubbing — pause while dragging, seek on release
+    this.seekEl.addEventListener('mousedown',  () => { this.seekEl.dragging = true; });
+    this.seekEl.addEventListener('touchstart', () => { this.seekEl.dragging = true; }, { passive: true });
+    this.seekEl.addEventListener('input', () => {
+      this.timeEl.textContent = _fmtTime(parseFloat(this.seekEl.value));
+    });
+    this.seekEl.addEventListener('change', () => {
+      this.audio.currentTime = parseFloat(this.seekEl.value);
+      this.seekEl.dragging = false;
+    });
+    this.seekEl.addEventListener('mouseup',  () => { this.seekEl.dragging = false; });
+    this.seekEl.addEventListener('touchend', () => { this.seekEl.dragging = false; });
+
+    this.audio.addEventListener('ended', () => {
+      this.seekEl.value = 0;
+      this.timeEl.textContent = '0:00';
+    });
+  },
+
+  /** Load a base64 audio string and show the player */
+  load(base64, mimeType) {
+    const wrap = document.getElementById('modal-audio-wrap');
+    this.init(); // re-wire listeners on fresh element
+    this.audio.src = `data:${mimeType};base64,${base64}`;
+    this.audio.load(); // force buffer
+    this.seekEl.value = 0;
+    this.timeEl.textContent  = '0:00';
+    this.durEl.textContent   = '…';
+    wrap.classList.remove('hidden');
+  },
+
+  hide() {
+    const wrap = document.getElementById('modal-audio-wrap');
+    if (wrap) wrap.classList.add('hidden');
+    if (this.audio) { this.audio.pause(); this.audio.src = ''; }
+  },
+};
+
+function _fmtTime(s) {
+  if (!s || !isFinite(s)) return '0:00';
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60).toString().padStart(2, '0');
+  return `${m}:${sec}`;
+}
+
+
+// ── DIAGNOSTICS ──────────────────────────────────────────────────
+// Tests each part of the pipeline and shows results in Settings.
+
+const Diagnostics = {
+  async run() {
+    const workerUrl = Store.getWorkerUrl();
+    const passcode  = Store.getPasscode();
+    const panel     = document.getElementById('diag-panel');
+
+    panel.classList.remove('hidden');
+    document.getElementById('diag-summary').textContent = '';
+    document.getElementById('diag-summary').className   = 'diag-summary';
+
+    const checks = ['worker','auth','groq-key','groq-model','groq-whisper','gemini'];
+    checks.forEach(k => {
+      document.getElementById(`diag-${k}-icon`).textContent   = '○';
+      document.getElementById(`diag-${k}-icon`).className     = 'diag-icon pending';
+      document.getElementById(`diag-${k}-detail`).textContent = 'checking…';
+    });
+
+    // Step 1: Worker URL set?
+    if (!workerUrl) {
+      this._row('worker', false, 'No Worker URL — add it in Settings above');
+      this._abort(['auth','groq-key','groq-model','groq-whisper','gemini']);
+      this._summary(false, 'Add your Worker URL first.');
+      return;
+    }
+
+    // Step 2: Worker reachable?
+    try {
+      const res = await fetch(`${workerUrl}/ping`, { method: 'GET' });
+      if (res.status === 404) {
+        this._row('worker', false, '/ping route missing — redeploy the latest worker.js');
+        this._abort(['auth','groq-key','groq-model','groq-whisper','gemini']);
+        this._summary(false, 'Redeploy worker.js — the /ping route is missing.');
+        return;
+      }
+      // 401 = Worker running but no passcode header yet — that is expected here
+      this._row('worker', true, `Reachable at ${workerUrl}`);
+    } catch (err) {
+      this._row('worker', false, `Cannot reach Worker: ${err.message}`);
+      this._abort(['auth','groq-key','groq-model','groq-whisper','gemini']);
+      this._summary(false, 'Check your Worker URL and that the Worker is deployed.');
+      return;
+    }
+
+    // Step 3: Passcode works?
+    if (!passcode) {
+      this._row('auth', false, 'No passcode stored — enter it on the lock screen');
+      this._abort(['groq-key','groq-model','groq-whisper','gemini']);
+      this._summary(false, 'Enter your passcode on the lock screen first.');
+      return;
+    }
+    try {
+      const res = await fetch(`${workerUrl}/ping`, {
+        method: 'GET',
+        headers: { 'X-Passcode': passcode },
+      });
+      if (res.ok) {
+        this._row('auth', true, 'Passcode accepted');
+      } else if (res.status === 401) {
+        this._row('auth', false, 'Passcode rejected — update it in Settings to match PASSCODE in your Worker env vars');
+        this._abort(['groq-key','groq-model','groq-whisper','gemini']);
+        this._summary(false, 'Wrong passcode. Update it in Settings or in your Cloudflare Worker variables.');
+        return;
+      } else {
+        this._row('auth', false, `Unexpected response: HTTP ${res.status}`);
+        this._abort(['groq-key','groq-model','groq-whisper','gemini']);
+        return;
+      }
+    } catch (err) {
+      this._row('auth', false, `Auth check failed: ${err.message}`);
+      this._abort(['groq-key','groq-model','groq-whisper','gemini']);
+      return;
+    }
+
+    // Step 4: Run /diagnose on Worker (checks Groq + Gemini)
+    try {
+      const res = await fetch(`${workerUrl}/diagnose`, {
+        method: 'GET',
+        headers: { 'X-Passcode': passcode },
+      });
+
+      if (res.status === 404) {
+        this._row('groq-key',     false, '/diagnose route missing — redeploy the latest worker.js');
+        this._abort(['groq-model','groq-whisper','gemini']);
+        this._summary(false, 'Redeploy worker.js — the /diagnose route is missing.');
+        return;
+      }
+
+      const data = await res.json();
+      const r    = data.results || {};
+
+      this._row('groq-key',     r.groq_key?.ok,     r.groq_key?.detail     || '—');
+      this._row('groq-model',   r.groq_model?.ok,   r.groq_model?.detail   || '—');
+      this._row('groq-whisper', r.groq_whisper?.ok, r.groq_whisper?.detail || '—');
+      this._row('gemini',       r.gemini?.ok,       r.gemini?.detail       || '—');
+
+      const anyAi = r.groq_model?.ok || r.gemini?.ok;
+      if (!r.groq_key?.ok) {
+        this._summary(false, 'Groq API key invalid — get a new one at console.groq.com and update GROQ_API_KEY in your Worker env vars.');
+      } else if (!anyAi) {
+        this._summary(false, 'Both AI providers failing — notes cannot be structured. Check both API keys.');
+      } else if (!r.groq_whisper?.ok) {
+        this._summary(false, 'Voice transcription failing — voice notes will not process. Text notes still work.');
+      } else if (!r.groq_model?.ok) {
+        this._summary(false, 'Groq chat failing but Gemini fallback works — notes will be structured via Gemini.');
+      } else {
+        this._summary(true, 'Everything looks good. If notes still queue, hit Retry all pending.');
+      }
+    } catch (err) {
+      this._row('groq-key',     false, `Diagnose request failed: ${err.message}`);
+      this._abort(['groq-model','groq-whisper','gemini']);
+      this._summary(false, 'Could not reach /diagnose — make sure the latest worker.js is deployed.');
+    }
+  },
+
+  _row(key, ok, detail) {
+    const icon = document.getElementById(`diag-${key}-icon`);
+    const det  = document.getElementById(`diag-${key}-detail`);
+    if (!icon || !det) return;
+    icon.textContent = ok ? '✓' : '✗';
+    icon.className   = `diag-icon ${ok ? 'ok' : 'fail'}`;
+    det.textContent  = detail;
+  },
+
+  _abort(keys) {
+    keys.forEach(k => {
+      const icon = document.getElementById(`diag-${k}-icon`);
+      const det  = document.getElementById(`diag-${k}-detail`);
+      if (!icon) return;
+      icon.textContent = '—';
+      icon.className   = 'diag-icon pending';
+      if (det) det.textContent = 'Skipped';
+    });
+  },
+
+  _summary(ok, msg) {
+    const el = document.getElementById('diag-summary');
+    el.textContent = msg;
+    el.className   = `diag-summary ${ok ? 'ok' : 'fail'}`;
+  },
+};
+
+
 const Settings = {
   load() {
     document.getElementById('setting-worker-url').value = Store.getWorkerUrl();
@@ -766,51 +1002,6 @@ const Settings = {
     if (!confirm('Delete ALL notes and settings? This cannot be undone.')) return;
     Store.clearAll();
     location.reload();
-  },
-
-  /** Load prompt textarea — fetches default from Worker if none set locally */
-  async loadPrompt() {
-    const ta = document.getElementById('setting-prompt');
-    if (!ta) return;
-    const saved = Store.getCustomPrompt();
-    if (saved) {
-      ta.value = saved;
-      document.getElementById('setting-prompt-status').textContent = 'Custom prompt active — overrides Worker default.';
-    } else {
-      ta.value = '';
-      ta.placeholder = 'Loading default prompt from Worker…';
-      // Fetch default prompt from /diagnose
-      const url      = Store.getWorkerUrl();
-      const passcode = Store.getPasscode();
-      if (url && passcode) {
-        try {
-          const res  = await fetch(`${url}/diagnose`, { headers: { 'X-Passcode': passcode } });
-          const data = await res.json();
-          if (data.defaultPrompt) {
-            ta.placeholder = data.defaultPrompt;
-            document.getElementById('setting-prompt-status').textContent = 'Showing Worker default prompt (read-only). Edit below to override.';
-          }
-        } catch {
-          ta.placeholder = '(Could not load default — check Worker URL and passcode)';
-        }
-      } else {
-        ta.placeholder = '(Set Worker URL and passcode first to load default)';
-      }
-      document.getElementById('setting-prompt-status').textContent = 'Using Worker default prompt.';
-    }
-  },
-
-  savePrompt() {
-    const val = document.getElementById('setting-prompt').value.trim();
-    Store.setCustomPrompt(val);
-    const status = document.getElementById('setting-prompt-status');
-    if (val) {
-      status.textContent = 'Custom prompt saved — will be used for all new notes.';
-      UI.showToast('Custom prompt saved', 'ok');
-    } else {
-      status.textContent = 'Cleared — Worker default prompt will be used.';
-      UI.showToast('Prompt reset to default', 'ok');
-    }
   },
 };
 
@@ -862,7 +1053,7 @@ const UI = {
 
     // Side effects per screen
     if (name === 'notes')    Render.renderNotesList();
-    if (name === 'settings') { Settings.load(); Settings.loadPrompt(); }
+    if (name === 'settings') Settings.load();
   },
 };
 
@@ -998,12 +1189,18 @@ function init() {
     Queue.drainQueue(true); // true = reset retry counts so stuck notes get another chance
     UI.showToast('Retrying pending notes…');
   });
-  document.getElementById('setting-clear-all').addEventListener('click',   () => Settings.clearAll());
-  document.getElementById('setting-prompt-save').addEventListener('click',  () => Settings.savePrompt());
-  document.getElementById('setting-prompt-reset').addEventListener('click', () => {
-    document.getElementById('setting-prompt').value = '';
-    Settings.savePrompt();
-    Settings.loadPrompt();
+  document.getElementById('setting-clear-all').addEventListener('click', () => Settings.clearAll());
+  document.getElementById('setting-diagnose').addEventListener('click',   () => Diagnostics.run());
+
+  // Prompt editor buttons (present in some versions of index.html)
+  const promptSaveBtn  = document.getElementById('setting-prompt-save');
+  const promptResetBtn = document.getElementById('setting-prompt-reset');
+  if (promptSaveBtn)  promptSaveBtn.addEventListener('click',  () => Settings.savePrompt?.());
+  if (promptResetBtn) promptResetBtn.addEventListener('click', () => {
+    const ta = document.getElementById('setting-prompt');
+    if (ta) ta.value = '';
+    Settings.savePrompt?.();
+    Settings.loadPrompt?.();
   });
 }
 
