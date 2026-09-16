@@ -230,7 +230,7 @@
         <textarea
           id="setting-prompt"
           class="settings-prompt-textarea"
-          placeholder="Loading default prompt from Worker… Leave empty to use Worker default."
+          placeholder="Leave empty to use the Worker's default (tagging, summary, topic, clarifying questions). Or write your own instructions — e.g. 'Clean up this text and add a Chinese translation below it, like: &lt;cleaned text&gt;&#10;&#10;中文翻译:&#10;&lt;translation&gt;'"
           rows="12"
           spellcheck="false"
         ></textarea>
@@ -238,7 +238,7 @@
           <button id="setting-prompt-save"  class="settings-btn">Save custom prompt</button>
           <button id="setting-prompt-reset" class="settings-btn">Reset to default</button>
         </div>
-        <p class="settings-hint">Edit and save to override the AI behaviour. Reset to go back to the Worker default. Changes apply to all new notes immediately.</p>
+        <p class="settings-hint">A custom prompt fully replaces the default behaviour — no tagging, summarising, topic-matching or clarifying questions run. You just get back whatever your prompt produces, shown as the note's text, plus the original transcript. Reset to go back to the Worker default. Changes apply to the next note processed.</p>
       </section>
 
       <!-- ── DIAGNOSTICS ── Tests each part of the pipeline ── -->
