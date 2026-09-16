@@ -26,6 +26,7 @@ const CONFIG = {
     WORKER_URL:  'nc_worker_url',   // Cloudflare Worker endpoint
     PENDING:     'nc_pending',      // array of note IDs awaiting processing
     CAPTURE_TYPE:'nc_capture_type', // last chosen capture type override
+    PROMPT:      'nc_custom_prompt',// custom AI prompt override (empty = Worker default)
   },
 
   // How often the retry queue runs (ms)
@@ -109,6 +110,12 @@ const Store = {
   setPasscode(v)   { localStorage.setItem(CONFIG.KEYS.PASSCODE, v); },
   getWorkerUrl()   { return (localStorage.getItem(CONFIG.KEYS.WORKER_URL) || '').replace(/\/$/, ''); },
   setWorkerUrl(v)  { localStorage.setItem(CONFIG.KEYS.WORKER_URL, v.replace(/\/$/, '')); },
+  /** Custom prompt override. Empty string/absent = use the Worker's built-in default. */
+  getPrompt()      { return localStorage.getItem(CONFIG.KEYS.PROMPT) || ''; },
+  setPrompt(v)     {
+    if (v) localStorage.setItem(CONFIG.KEYS.PROMPT, v);
+    else   localStorage.removeItem(CONFIG.KEYS.PROMPT); // keep storage clean when reset
+  },
 
   /** Wipe everything */
   clearAll() {
@@ -359,6 +366,7 @@ const Queue = {
         type_hint: note.user.type_override || null,
         existing_topics: _getExistingTopics(),
         clarification_answer: note.ai.clarification_answer || null,
+        custom_prompt: Store.getPrompt() || null,
       };
 
       // Attach audio if present
@@ -460,6 +468,23 @@ const Queue = {
 /** Apply AI result fields onto a note object (mutates note).
  *  Only copies the exact fields we expect — ignores anything extra the AI adds. */
 function _applyAiResult(note, result) {
+  // ── Custom-prompt mode ───────────────────────────────────────
+  // When a custom prompt (Settings → AI Prompt) is active, the Worker
+  // skips its tagging/summarising/clarification pipeline and returns just
+  // { result, transcript }. Everything else (type, summary, topic, fields,
+  // clarification) is left as-is/empty — no extra routing is forced.
+  if (typeof result.result === 'string') {
+    note.ai.type               = note.ai.type || 'note';
+    note.ai.type_confidence    = 'high';
+    note.ai.cleaned_text       = result.result || note.input.raw_text;
+    note.ai.summary            = '';
+    note.ai.fields             = {};
+    note.ai.clarification_needed   = false;
+    note.ai.clarification_question = null;
+    return;
+  }
+
+  // ── Default structured mode ──────────────────────────────────
   note.ai.type               = result.type || 'note';
   note.ai.type_confidence    = result.type_confidence || 'high';
   note.ai.cleaned_text       = result.cleaned_text || note.input.raw_text;
@@ -966,6 +991,7 @@ const Diagnostics = {
 const Settings = {
   load() {
     document.getElementById('setting-worker-url').value = Store.getWorkerUrl();
+    this.loadPrompt();
 
     // Show pending queue details including last errors
     const pendingIds = Store.getPending();
@@ -1002,6 +1028,29 @@ const Settings = {
     if (!confirm('Delete ALL notes and settings? This cannot be undone.')) return;
     Store.clearAll();
     location.reload();
+  },
+
+  /** Populate the prompt textarea + status line from storage. */
+  loadPrompt() {
+    const ta     = document.getElementById('setting-prompt');
+    const status = document.getElementById('setting-prompt-status');
+    if (!ta || !status) return; // older index.html without the prompt editor
+
+    const custom = Store.getPrompt();
+    ta.value = custom;
+    status.textContent = custom
+      ? 'Using your custom prompt — tagging/summary/clarifying questions are skipped; you get back "result" + the original transcript.'
+      : 'Using Worker default prompt (type, summary, topic, fields, clarifying questions).';
+  },
+
+  /** Save (or clear, if empty) the custom prompt override. */
+  savePrompt() {
+    const ta = document.getElementById('setting-prompt');
+    if (!ta) return;
+    const value = ta.value.trim();
+    Store.setPrompt(value);
+    this.loadPrompt();
+    UI.showToast(value ? 'Custom prompt saved' : 'Reverted to Worker default prompt', 'ok');
   },
 };
 
