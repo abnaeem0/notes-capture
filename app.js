@@ -27,7 +27,7 @@ const CONFIG = {
     PENDING:     'nc_pending',      // array of note IDs awaiting processing
     CAPTURE_TYPE:'nc_capture_type', // last chosen capture type override
     PROMPT:      'nc_custom_prompt',// custom AI prompt override (empty = Worker default)
-    DATA_VERSION:'nc_data_version',  // note schema version for one-time migrations
+    DATA_VERSION:'nc_data_version', // note schema migration version
   },
 
   // How often the retry queue runs (ms)
@@ -123,82 +123,45 @@ const Store = {
     Object.values(CONFIG.KEYS).forEach(k => localStorage.removeItem(k));
   },
 
-/** Run versioned, non-destructive note schema migrations on boot */
-migrateNotes() {
-  const currentVersion = Number(
-    localStorage.getItem(CONFIG.KEYS.DATA_VERSION) || '0'
-  );
+  /** Run versioned, non-destructive note schema migrations on boot */
+  migrateNotes() {
+    const currentVersion = Number(localStorage.getItem(CONFIG.KEYS.DATA_VERSION) || '0');
 
-  // Version 1 — Stage 1 data model
-  if (currentVersion < 1) {
-    const notes = this.getNotes();
+    // Version 1 — Stage 1 data model
+    if (currentVersion < 1) {
+      const notes = this.getNotes();
+      const migrated = notes.map(note => {
+        note.input = note.input || {};
+        note.ai = note.ai || {};
+        note.user = note.user || {};
 
-    const migrated = notes.map(note => {
-      // Keep every legacy field so an older app version can still read the note.
-      note.input = note.input || {};
-      note.ai    = note.ai || {};
-      note.user  = note.user || {};
-
-      // Context is an append-only history added in Stage 1.
-      if (!Array.isArray(note.context)) {
-        note.context = [];
-      }
-
-      // Singular legacy topic becomes the first AI topic.
-      if (!Array.isArray(note.ai.topics)) {
-        note.ai.topics = note.ai.topic
-          ? [note.ai.topic]
-          : [];
-      }
-
-      // User-edit fields are deliberately separate from AI output.
-      if (!Object.prototype.hasOwnProperty.call(note.user, 'cleaned_text')) {
-        note.user.cleaned_text = null;
-      }
-
-      if (!Object.prototype.hasOwnProperty.call(note.user, 'summary')) {
-        note.user.summary = null;
-      }
-
-      if (!Object.prototype.hasOwnProperty.call(note.user, 'fields')) {
-        note.user.fields = null;
-      }
-
-      if (!Array.isArray(note.user.tags_added)) {
-        note.user.tags_added = [];
-      }
-
-      if (!Array.isArray(note.user.tags_removed)) {
-        note.user.tags_removed = [];
-      }
-
-      // Convert an old topic override into equivalent tag edits.
-      // Keep topic_override itself for rollback compatibility.
-      const oldOverride = note.user.topic_override;
-      const oldAiTopic  = note.ai.topic;
-
-      if (oldOverride && oldOverride !== oldAiTopic) {
-        if (!note.user.tags_added.includes(oldOverride)) {
-          note.user.tags_added.push(oldOverride);
+        if (!Array.isArray(note.context)) note.context = [];
+        if (!Array.isArray(note.ai.topics)) {
+          note.ai.topics = note.ai.topic ? [note.ai.topic] : [];
         }
 
-        if (
-          oldAiTopic &&
-          !note.user.tags_removed.includes(oldAiTopic)
-        ) {
-          note.user.tags_removed.push(oldAiTopic);
+        if (!Object.prototype.hasOwnProperty.call(note.user, 'cleaned_text')) note.user.cleaned_text = null;
+        if (!Object.prototype.hasOwnProperty.call(note.user, 'summary')) note.user.summary = null;
+        if (!Object.prototype.hasOwnProperty.call(note.user, 'fields')) note.user.fields = null;
+        if (!Array.isArray(note.user.tags_added)) note.user.tags_added = [];
+        if (!Array.isArray(note.user.tags_removed)) note.user.tags_removed = [];
+
+        // Preserve the visible result of a legacy single-topic override.
+        const oldOverride = note.user.topic_override;
+        const oldAiTopic = note.ai.topic;
+        if (oldOverride && oldOverride !== oldAiTopic) {
+          if (!note.user.tags_added.includes(oldOverride)) note.user.tags_added.push(oldOverride);
+          if (oldAiTopic && !note.user.tags_removed.includes(oldAiTopic)) note.user.tags_removed.push(oldAiTopic);
         }
-      }
 
-      return note;
-    });
+        return note;
+      });
 
-    this.setNotes(migrated);
-
-    // Only mark the migration complete after the notes were saved successfully.
-    localStorage.setItem(CONFIG.KEYS.DATA_VERSION, '1');
-  }
-},
+      this.setNotes(migrated);
+      localStorage.setItem(CONFIG.KEYS.DATA_VERSION, '1');
+    }
+  },
+};
 
 
 // ── 3. AUTH ──────────────────────────────────────────────────────
@@ -246,66 +209,49 @@ const Capture = {
   recordTimer: null,
   captureTypeOverride: null, // null = let AI decide
 
-/** Build a fresh empty note object */
-makeNote(mode) {
-  return {
-    id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    status: 'raw', // raw | processing | done | needs_context
-
-    input: {
-      mode,               // 'voice' | 'text'
-      raw_text: '',       // typed text or transcript — updated when transcription arrives
-      original_text: '',  // set once at capture time, NEVER overwritten afterward
-      audio_blob_key: null,
-    },
-
-    // Chronological context history. Entries are appended, never overwritten.
-    context: [],
-
-    // AI output. User edits must not overwrite these Stage 1 values.
-    ai: {
-      type: null,
-      type_confidence: null,
-      cleaned_text: '',
-      summary: '',
-      fields: {},
-
-      // Stage 1 tag model
-      topics: [],
-
-      // Legacy field retained temporarily while old UI still uses it.
-      topic: '',
-
-      clarification_needed: false,
-      clarification_question: null,
-
-      // Legacy field retained until clarification UI is replaced.
-      clarification_answer: null,
-    },
-
-    // User changes live separately from AI output.
-    user: {
-      type_override: this.captureTypeOverride,
-      cleaned_text: null,
-      summary: null,
-      fields: null,
-      tags_added: [],
-      tags_removed: [],
-
-      // Legacy fields retained temporarily for compatibility.
-      topic_override: null,
-      edits: {},
-    },
-
-    sync: {
-      pending: true,
-      retry_count: 0,
-      last_error: null,
-    },
-  };
-},
+  /** Build a fresh empty note object */
+  makeNote(mode) {
+    return {
+      id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      status: 'raw', // raw | processing | done | needs_context
+      input: {
+        mode,               // 'voice' | 'text'
+        raw_text: '',       // typed text or transcript — updated when transcription arrives
+        original_text: '',  // set once at capture time, NEVER overwritten afterward
+        audio_blob_key: null,
+      },
+      context: [],
+      ai: {
+        type: null,
+        type_confidence: null,
+        cleaned_text: '',
+        summary: '',
+        fields: {},
+        topics: [],
+        topic: '', // legacy field retained until UI switches to topics[]
+        clarification_needed: false,
+        clarification_question: null,
+        clarification_answer: null, // legacy field retained until context UI lands
+      },
+      user: {
+        type_override: this.captureTypeOverride,
+        cleaned_text: null,
+        summary: null,
+        fields: null,
+        tags_added: [],
+        tags_removed: [],
+        topic_override: null, // legacy field retained for current UI
+        edits: {},            // legacy field retained for rollback compatibility
+      },
+      sync: {
+        pending: true,
+        retry_count: 0,
+        last_error: null,
+      },
+    };
+  },
 
   /** Check if the browser supports audio recording */
   hasVoiceSupport() {
