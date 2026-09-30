@@ -154,14 +154,24 @@
         <input id="modal-topic" class="modal-topic-input" type="text" placeholder="topic tag" />
       </div>
 
-      <!-- Clarification banner — shown if AI flagged needs_context -->
-      <div id="clarification-banner" class="clarif-banner hidden">
-        <span class="clarif-icon">?</span>
-        <div class="clarif-body">
-          <p id="clarif-question" class="clarif-q"></p>
-          <textarea id="clarif-answer" class="clarif-input" placeholder="Add context here…" rows="2"></textarea>
-          <button id="clarif-submit" class="clarif-btn">Submit & reprocess</button>
+      <!-- Original capture + chronological context history -->
+      <div class="modal-history">
+        <div id="modal-original-meta" class="history-label"></div>
+        <div id="modal-original-text" class="history-text"></div>
+        <div id="modal-context-history" class="context-history"></div>
+      </div>
+
+      <!-- One context box: answers AI questions or adds manual context -->
+      <div id="context-panel" class="context-panel">
+        <div id="context-question-wrap" class="context-question-wrap hidden">
+          <span class="clarif-icon">?</span>
+          <div class="clarif-body">
+            <p id="context-question" class="clarif-q"></p>
+            <button id="context-dismiss" class="context-dismiss-btn" type="button">Dismiss</button>
+          </div>
         </div>
+        <textarea id="context-input" class="clarif-input" placeholder="Add context…" rows="2"></textarea>
+        <button id="context-submit" class="clarif-btn" type="button">Add context & reprocess</button>
       </div>
 
       <!-- Audio player — visible only for unprocessed voice notes with saved blob -->
@@ -193,8 +203,11 @@
       <p id="modal-timestamps" class="modal-timestamps"></p>
 
       <!-- Actions -->
-      <div class="modal-actions">
+      <div class="modal-actions modal-actions-primary">
         <button id="modal-save" class="modal-save-btn">Save changes</button>
+        <button id="modal-reprocess" class="modal-secondary-btn">Reprocess</button>
+      </div>
+      <div class="modal-actions">
         <button id="modal-delete" class="modal-delete-btn">Delete</button>
       </div>
     </div>
