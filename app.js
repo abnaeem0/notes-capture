@@ -27,6 +27,7 @@ const CONFIG = {
     PENDING:     'nc_pending',      // array of note IDs awaiting processing
     CAPTURE_TYPE:'nc_capture_type', // last chosen capture type override
     PROMPT:      'nc_custom_prompt',// custom AI prompt override (empty = Worker default)
+    DATA_VERSION:'nc_data_version',  // note schema version for one-time migrations
   },
 
   // How often the retry queue runs (ms)
