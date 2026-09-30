@@ -402,10 +402,12 @@ const Queue = {
       const body = {
         note_id: note.id,
         mode: note.input.mode,
-        raw_text: note.input.raw_text || null,
+        // Reprocessing always starts from pristine original + chronological context.
+        // The current Worker accepts this as raw_text; Checkpoint 4 formalises the contract.
+        raw_text: _assembleReprocessText(note) || note.input.raw_text || null,
         type_hint: note.user.type_override || null,
         existing_topics: _getExistingTopics(),
-        clarification_answer: note.ai.clarification_answer || null,
+        clarification_answer: null,
         custom_prompt: Store.getPrompt() || null,
       };
 
@@ -435,12 +437,12 @@ const Queue = {
       const data = await res.json();
 
       if (data.status === 'ok' && data.result) {
-        // Store transcript — but only set original_text once (first transcription)
-        if (data.result.transcript) {
+        // Store the first transcript as the pristine original.
+        // On later reprocesses the Worker echoes assembled original + context;
+        // never let that overwrite the locked original/raw capture.
+        if (data.result.transcript && !note.input.original_text) {
           note.input.raw_text = data.result.transcript;
-          if (!note.input.original_text) {
-            note.input.original_text = data.result.transcript; // locked after first set
-          }
+          note.input.original_text = data.result.transcript;
         }
 
         _applyAiResult(note, data.result);
@@ -530,6 +532,9 @@ function _applyAiResult(note, result) {
   note.ai.cleaned_text       = result.cleaned_text || note.input.raw_text;
   note.ai.summary            = result.summary || '';
   note.ai.topic              = result.topic || '';
+  note.ai.topics             = Array.isArray(result.topics)
+    ? result.topics.filter(Boolean).slice(0, 4)
+    : (result.topic ? [result.topic] : []);
   // Strip fields to only allowed keys for this type — no AI extras
   note.ai.fields             = _sanitiseFields(result.type, result.fields || {});
   note.ai.clarification_needed   = !!result.clarification_needed;
@@ -551,9 +556,110 @@ function _sanitiseFields(type, fields) {
   return Object.fromEntries(allowed.map(k => [k, fields[k] ?? '']));
 }
 
-/** Collect distinct topic strings from existing notes (for AI context) */
+/** Return the final displayed type after any user override. */
+function _getFinalType(note) {
+  return note.user?.type_override || note.ai?.type || 'note';
+}
+
+/** Return final cleaned text without overwriting the AI's original output. */
+function _getFinalCleanedText(note) {
+  return note.user?.cleaned_text !== null && note.user?.cleaned_text !== undefined
+    ? note.user.cleaned_text
+    : (note.ai?.cleaned_text || note.input?.raw_text || '');
+}
+
+/** Return final summary without overwriting the AI's original output. */
+function _getFinalSummary(note) {
+  return note.user?.summary !== null && note.user?.summary !== undefined
+    ? note.user.summary
+    : (note.ai?.summary || '');
+}
+
+/** Return final fields without overwriting the AI's original output. */
+function _getFinalFields(note) {
+  return note.user?.fields !== null && note.user?.fields !== undefined
+    ? note.user.fields
+    : (note.ai?.fields || {});
+}
+
+/** Return final tags: AI tags plus user additions, minus user removals. */
+function _getFinalTags(note) {
+  const aiTags = Array.isArray(note.ai?.topics)
+    ? note.ai.topics
+    : (note.ai?.topic ? [note.ai.topic] : []);
+  const added = Array.isArray(note.user?.tags_added) ? note.user.tags_added : [];
+  const removed = new Set(
+    (Array.isArray(note.user?.tags_removed) ? note.user.tags_removed : [])
+      .map(t => String(t).trim().toLowerCase())
+  );
+
+  const seen = new Set();
+  return [...aiTags, ...added]
+    .map(t => String(t).trim())
+    .filter(Boolean)
+    .filter(t => !removed.has(t.toLowerCase()))
+    .filter(t => {
+      const key = t.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+/** Collect distinct FINAL topic strings from existing notes (for AI context). */
 function _getExistingTopics() {
-  return [...new Set(Store.getNotes().map(n => n.ai.topic).filter(Boolean))].slice(0, 20);
+  const seen = new Set();
+  const topics = [];
+  Store.getNotes().forEach(note => {
+    _getFinalTags(note).forEach(topic => {
+      const key = topic.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        topics.push(topic);
+      }
+    });
+  });
+  return topics.slice(0, 20);
+}
+
+/** Build the exact text used for reprocessing: pristine original + all context in order. */
+function _assembleReprocessText(note) {
+  const original = note.input?.original_text || note.input?.raw_text || '';
+  const entries = Array.isArray(note.context) ? note.context : [];
+  if (!entries.length) return original;
+
+  const parts = [`Original:\n${original}`];
+  entries.forEach(entry => {
+    if (entry.source === 'ai_question' && entry.question) {
+      parts.push(`AI asked: ${entry.question}\nUser answered: ${entry.text || ''}`);
+    } else {
+      parts.push(`User added: ${entry.text || ''}`);
+    }
+  });
+  return parts.join('\n\n');
+}
+
+/** Clear user-owned AI-derived edits before a deliberate reprocess.
+ *  Hand-added/removed tags are intentionally preserved. */
+function _clearUserEditsForReprocess(note) {
+  note.user.cleaned_text = null;
+  note.user.summary = null;
+  note.user.fields = null;
+  note.user.type_override = null;
+  note.user.topic_override = null; // legacy compatibility field only
+}
+
+/** Compact local timestamp for history labels. */
+function _historyTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString([], {
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 /** Convert a Blob to a base64 data URL string */
@@ -580,15 +686,15 @@ const Render = {
 
     // Apply type filter
     if (this.currentFilter !== 'all') {
-      notes = notes.filter(n => (n.user.type_override || n.ai.type) === this.currentFilter);
+      notes = notes.filter(n => _getFinalType(n) === this.currentFilter);
     }
 
     // Apply text search
     if (this.currentSearch) {
       const q = this.currentSearch.toLowerCase();
       notes = notes.filter(n =>
-        [n.input.raw_text, n.ai.cleaned_text, n.ai.summary, n.ai.topic,
-         ...Object.values(n.ai.fields || {})]
+        [n.input.raw_text, _getFinalCleanedText(n), _getFinalSummary(n),
+         ..._getFinalTags(n), ...Object.values(_getFinalFields(n))]
           .some(v => String(v || '').toLowerCase().includes(q))
       );
     }
@@ -609,10 +715,10 @@ const Render = {
 
 /** Generate HTML string for a single note card */
 function _noteCardHTML(note) {
-  const type    = note.user.type_override || note.ai.type || 'raw';
+  const type    = _getFinalType(note);
   const label   = CONFIG.TYPES.find(t => t.value === type)?.label || type;
-  const topic   = note.user.topic_override || note.ai.topic || '';
-  const summary = note.ai.summary || note.ai.cleaned_text || note.input.raw_text || '(no content)';
+  const topic   = _getFinalTags(note)[0] || '';
+  const summary = _getFinalSummary(note) || _getFinalCleanedText(note) || note.input.raw_text || '(no content)';
   const time    = _relativeTime(note.created_at);
 
   const needsCtx  = note.status === 'needs_context' ? 'needs-context' : '';
@@ -637,40 +743,30 @@ function _noteCardHTML(note) {
 
 const Modal = {
   currentId: null,
+  openSnapshot: null,
 
   open(id) {
     const note = Store.getNote(id);
     if (!note) return;
     this.currentId = id;
 
-    const type  = note.user.type_override || note.ai.type || 'note';
-    const topic = note.user.topic_override || note.ai.topic || '';
+    const type = _getFinalType(note);
+    const tags = _getFinalTags(note);
 
-    // Populate fields
     document.getElementById('modal-type').value    = type;
-    document.getElementById('modal-topic').value   = topic;
-    document.getElementById('modal-cleaned').value = note.ai.cleaned_text || note.input.raw_text || '';
-    document.getElementById('modal-summary').value = note.ai.summary || '';
+    document.getElementById('modal-topic').value   = tags.join(', ');
+    document.getElementById('modal-cleaned').value = _getFinalCleanedText(note);
+    document.getElementById('modal-summary').value = _getFinalSummary(note);
 
-    // Show original capture text if different from cleaned (gives user full transparency)
-    const original = note.input.original_text || '';
-    const cleaned  = note.ai.cleaned_text || '';
-    const showOriginal = original && original !== cleaned;
+    // New Stage 1 modal sections. Guard these so a cached older index.html
+    // cannot prevent notes from opening while GitHub Pages updates.
+    if (document.getElementById('modal-original-meta')) this._renderHistory(note);
+    if (document.getElementById('context-question-wrap')) this._renderContextPanel(note);
+    this._renderFields(note);
+
     document.getElementById('modal-timestamps').textContent =
-      `created ${_relativeTime(note.created_at)}  ·  updated ${_relativeTime(note.updated_at)}`
-      + (showOriginal ? `\noriginal: "${original.slice(0, 120)}${original.length > 120 ? '…' : ''}"` : '');
+      `created ${_relativeTime(note.created_at)}  ·  updated ${_relativeTime(note.updated_at)}`;
 
-    // Clarification banner
-    const banner = document.getElementById('clarification-banner');
-    if (note.ai.clarification_needed && !note.ai.clarification_answer) {
-      document.getElementById('clarif-question').textContent = note.ai.clarification_question || 'Can you add more context?';
-      document.getElementById('clarif-answer').value = '';
-      banner.classList.remove('hidden');
-    } else {
-      banner.classList.add('hidden');
-    }
-
-    // Audio player — show if note has a saved audio blob
     if (note.input.audio_blob_key) {
       const base64 = localStorage.getItem(note.input.audio_blob_key);
       if (base64) {
@@ -683,19 +779,35 @@ const Modal = {
       AudioPlayer.hide();
     }
 
-    // Dynamic type-specific fields
-    this._renderFields(note);
-
-    // Show modal
     document.getElementById('modal-note').classList.remove('hidden');
     document.body.style.overflow = 'hidden';
+    this.openSnapshot = this._formSnapshot();
   },
 
   close() {
     this.currentId = null;
-    AudioPlayer.hide(); // stop audio when modal closes
+    this.openSnapshot = null;
+    AudioPlayer.hide();
     document.getElementById('modal-note').classList.add('hidden');
     document.body.style.overflow = '';
+  },
+
+  _formSnapshot() {
+    const fields = {};
+    document.querySelectorAll('#modal-fields .field-input').forEach(input => {
+      fields[input.dataset.field] = input.value;
+    });
+    return JSON.stringify({
+      type: document.getElementById('modal-type').value,
+      tags: document.getElementById('modal-topic').value,
+      cleaned: document.getElementById('modal-cleaned').value,
+      summary: document.getElementById('modal-summary').value,
+      fields,
+    });
+  },
+
+  hasUnsavedChanges() {
+    return this.openSnapshot !== null && this._formSnapshot() !== this.openSnapshot;
   },
 
   save() {
@@ -703,17 +815,33 @@ const Modal = {
     if (!note) return;
 
     const selectedType = document.getElementById('modal-type').value;
-    const selectedTopic = document.getElementById('modal-topic').value.trim();
+    const selectedTags = document.getElementById('modal-topic').value
+      .split(',')
+      .map(t => t.trim())
+      .filter(Boolean);
 
-    note.user.type_override  = selectedType !== note.ai.type ? selectedType : null;
-    note.user.topic_override = selectedTopic !== note.ai.topic ? selectedTopic : null;
-    note.ai.cleaned_text     = document.getElementById('modal-cleaned').value.trim();
-    note.ai.summary          = document.getElementById('modal-summary').value.trim();
+    note.user.type_override = selectedType !== note.ai.type ? selectedType : null;
+    note.user.cleaned_text  = document.getElementById('modal-cleaned').value.trim();
+    note.user.summary       = document.getElementById('modal-summary').value.trim();
 
-    // Collect dynamic fields
+    const aiTags = Array.isArray(note.ai.topics)
+      ? note.ai.topics
+      : (note.ai.topic ? [note.ai.topic] : []);
+    const aiKeys = new Set(aiTags.map(t => String(t).trim().toLowerCase()));
+    const selectedKeys = new Set(selectedTags.map(t => t.toLowerCase()));
+
+    note.user.tags_added = selectedTags.filter(t => !aiKeys.has(t.toLowerCase()));
+    note.user.tags_removed = aiTags.filter(t => !selectedKeys.has(String(t).trim().toLowerCase()));
+
+    note.user.topic_override = selectedTags.length === 1 && selectedTags[0] !== note.ai.topic
+      ? selectedTags[0]
+      : null;
+
+    const userFields = {};
     document.querySelectorAll('#modal-fields .field-input').forEach(input => {
-      note.ai.fields[input.dataset.field] = input.value.trim();
+      userFields[input.dataset.field] = input.value.trim();
     });
+    note.user.fields = userFields;
 
     Store.saveNote(note);
     this.close();
@@ -729,30 +857,138 @@ const Modal = {
     UI.showToast('Deleted');
   },
 
-  /** Submit a clarification answer and re-queue the note */
-  submitClarification() {
-    const note   = Store.getNote(this.currentId);
-    const answer = document.getElementById('clarif-answer').value.trim();
-    if (!note || !answer) return;
+  /** Re-run AI from pristine original + all saved context. */
+  reprocess() {
+    const note = Store.getNote(this.currentId);
+    if (!note) return;
 
-    note.ai.clarification_answer = answer;
-    note.status    = 'raw';
+    if (this.hasUnsavedChanges() &&
+        !confirm('You have unsaved edits. Reprocessing will discard them. Continue?')) {
+      return;
+    }
+
+    _clearUserEditsForReprocess(note);
+    note.ai.clarification_dismissed = false;
+    note.status = 'raw';
     note.sync.pending = true;
+    note.sync.retry_count = 0;
+    note.sync.last_error = null;
+
     Store.saveNote(note);
     Store.addPending(note.id);
-
     this.close();
     Queue.processNote(note.id);
-    UI.showToast('Reprocessing with context…');
+    UI.showToast('Reprocessing…');
+  },
+
+  /** Add one chronological context entry, then reprocess. */
+  addContextAndReprocess() {
+    const note = Store.getNote(this.currentId);
+    const text = document.getElementById('context-input').value.trim();
+    if (!note || !text) return;
+
+    if (this.hasUnsavedChanges() &&
+        !confirm('You have unsaved edits. Reprocessing will discard them. Continue?')) {
+      return;
+    }
+
+    const hasQuestion = !!(
+      note.ai.clarification_needed &&
+      !note.ai.clarification_dismissed &&
+      note.ai.clarification_question
+    );
+
+    note.context = Array.isArray(note.context) ? note.context : [];
+    note.context.push({
+      id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      at: new Date().toISOString(),
+      source: hasQuestion ? 'ai_question' : 'manual',
+      question: hasQuestion ? note.ai.clarification_question : null,
+      text,
+    });
+
+    _clearUserEditsForReprocess(note);
+    note.ai.clarification_dismissed = false;
+    note.status = 'raw';
+    note.sync.pending = true;
+    note.sync.retry_count = 0;
+    note.sync.last_error = null;
+
+    Store.saveNote(note);
+    Store.addPending(note.id);
+    this.close();
+    Queue.processNote(note.id);
+    UI.showToast('Context added — reprocessing…');
+  },
+
+  /** Hide the current needs-context state without deleting the AI question. */
+  dismissContextQuestion() {
+    const note = Store.getNote(this.currentId);
+    if (!note) return;
+
+    note.ai.clarification_dismissed = true;
+    if (note.status === 'needs_context') note.status = 'done';
+    Store.saveNote(note);
+
+    this._renderContextPanel(note);
+    Render.renderNotesList();
+    UI.showToast('Question dismissed');
+  },
+
+  _renderHistory(note) {
+    const original = note.input.original_text || note.input.raw_text || '';
+    document.getElementById('modal-original-meta').textContent =
+      `[original · ${_historyTime(note.created_at)}]`;
+    document.getElementById('modal-original-text').textContent = original || '(empty)';
+
+    const history = document.getElementById('modal-context-history');
+    const entries = Array.isArray(note.context) ? note.context : [];
+
+    history.innerHTML = entries.map(entry => {
+      if (entry.source === 'ai_question') {
+        return `
+          <div class="context-entry">
+            <div class="history-label">[AI asked · ${escHtml(_historyTime(entry.at))}]</div>
+            <div class="history-text">${escHtml(entry.question || '')}</div>
+            <div class="history-label">[You answered · ${escHtml(_historyTime(entry.at))}]</div>
+            <div class="history-text">${escHtml(entry.text || '')}</div>
+          </div>`;
+      }
+      return `
+        <div class="context-entry">
+          <div class="history-label">[You added · ${escHtml(_historyTime(entry.at))}]</div>
+          <div class="history-text">${escHtml(entry.text || '')}</div>
+        </div>`;
+    }).join('');
+  },
+
+  _renderContextPanel(note) {
+    const wrap = document.getElementById('context-question-wrap');
+    if (!wrap) return;
+    const hasQuestion = !!(
+      note.ai.clarification_needed &&
+      !note.ai.clarification_dismissed &&
+      note.ai.clarification_question
+    );
+
+    if (hasQuestion) {
+      document.getElementById('context-question').textContent = note.ai.clarification_question;
+      document.getElementById('context-input').placeholder = 'Answer the AI question…';
+      wrap.classList.remove('hidden');
+    } else {
+      document.getElementById('context-question').textContent = '';
+      document.getElementById('context-input').placeholder = 'Add context…';
+      wrap.classList.add('hidden');
+    }
+    document.getElementById('context-input').value = '';
   },
 
   /** Render dynamic fields based on the note type */
   _renderFields(note) {
     const container = document.getElementById('modal-fields');
-    const type = note.user.type_override || note.ai.type || 'note';
-    const fields = note.ai.fields || {};
+    const type = _getFinalType(note);
+    const fields = _getFinalFields(note);
 
-    // Field definitions per type — add new types / fields here
     const FIELD_DEFS = {
       todo:     [{ key: 'action', label: 'Action', type: 'text' }, { key: 'priority', label: 'Priority', type: 'text' }],
       reminder: [{ key: 'action', label: 'Action', type: 'text' }, { key: 'due_datetime', label: 'Due', type: 'text' }],
@@ -779,7 +1015,6 @@ const Modal = {
     `).join('');
   },
 };
-
 
 // ── 8. SETTINGS ──────────────────────────────────────────────────
 
@@ -1255,9 +1490,11 @@ function init() {
 
   // ── Modal actions
   document.getElementById('modal-backdrop').addEventListener('click', () => Modal.close());
-  document.getElementById('modal-save').addEventListener('click',     () => Modal.save());
-  document.getElementById('modal-delete').addEventListener('click',   () => Modal.delete());
-  document.getElementById('clarif-submit').addEventListener('click',  () => Modal.submitClarification());
+  document.getElementById('modal-save').addEventListener('click',      () => Modal.save());
+  document.getElementById('modal-reprocess')?.addEventListener('click', () => Modal.reprocess());
+  document.getElementById('modal-delete').addEventListener('click',    () => Modal.delete());
+  document.getElementById('context-submit')?.addEventListener('click',  () => Modal.addContextAndReprocess());
+  document.getElementById('context-dismiss')?.addEventListener('click', () => Modal.dismissContextQuestion());
 
   // Auto-save Worker URL when it changes — also retry pending notes
   document.getElementById('setting-worker-url').addEventListener('change', e => {
