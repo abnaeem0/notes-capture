@@ -26,9 +26,13 @@ const CONFIG = {
     WORKER_URL:  'nc_worker_url',   // Cloudflare Worker endpoint
     PENDING:     'nc_pending',      // array of note IDs awaiting processing
     CAPTURE_TYPE:'nc_capture_type', // last chosen capture type override
+    TRANSCRIPTION_PROMPT: 'nc_transcription_prompt',
     PROMPT:      'nc_custom_prompt',// custom AI prompt override (empty = Worker default)
     DATA_VERSION:'nc_data_version', // note schema migration version
   },
+
+  API_VERSION: 2,
+  DEFAULT_TRANSCRIPTION_PROMPT: 'Mixed English, Urdu and Arabic speech. Use Latin letters for English, Urdu script for Urdu, and Arabic script for Arabic; no Hindi or Punjabi. Examples: Please کل صبح meeting رکھ دیں۔ الحمد لله، I will call tomorrow. ہوٹل کی maintenance check کرنی ہے۔',
 
   // How often the retry queue runs (ms)
   QUEUE_INTERVAL_MS: 60_000,
@@ -118,6 +122,9 @@ const Store = {
     else   localStorage.removeItem(CONFIG.KEYS.PROMPT); // keep storage clean when reset
   },
 
+  getTranscriptionPrompt() { return localStorage.getItem(CONFIG.KEYS.TRANSCRIPTION_PROMPT) ?? CONFIG.DEFAULT_TRANSCRIPTION_PROMPT; },
+  setTranscriptionPrompt(v) { localStorage.setItem(CONFIG.KEYS.TRANSCRIPTION_PROMPT, v); },
+
   /** Wipe everything */
   clearAll() {
     Object.values(CONFIG.KEYS).forEach(k => localStorage.removeItem(k));
@@ -154,11 +161,18 @@ const Store = {
           if (oldAiTopic && !note.user.tags_removed.includes(oldAiTopic)) note.user.tags_removed.push(oldAiTopic);
         }
 
+        if (note.ai.clarification_dismissed) note.user.dismissed_question_id = note.ai.clarification_question;
         return note;
       });
 
       this.setNotes(migrated);
       localStorage.setItem(CONFIG.KEYS.DATA_VERSION, '1');
+    }
+    if (currentVersion < 2) {
+      const notes = this.getNotes();
+      notes.forEach(n => { if (n.ai?.clarification_dismissed && n.user) n.user.dismissed_question_id = n.ai.clarification_question; });
+      this.setNotes(notes);
+      localStorage.setItem(CONFIG.KEYS.DATA_VERSION, '2');
     }
   },
 };
@@ -329,6 +343,7 @@ const Capture = {
       const base64 = await blobToBase64(blob);
       localStorage.setItem(blobKey, base64);
       note.input.audio_blob_key = blobKey;
+      note.input.audio_mime_type = blob.type.split(';')[0];
     } catch (err) {
       console.warn('Capture: could not save audio blob', err);
     }
@@ -375,10 +390,11 @@ const Capture = {
 // goes through here. Retries on failure, gives up after MAX_RETRIES.
 
 const Queue = {
+  active: new Set(),
   /** Process a single note by id */
   async processNote(id) {
     const note = Store.getNote(id);
-    if (!note) return;
+    if (!note || this.active.has(id) || navigator.onLine === false) return;
 
     const workerUrl = Store.getWorkerUrl();
     const passcode  = Store.getPasscode();
@@ -394,27 +410,38 @@ const Queue = {
       return;
     }
 
+    this.active.add(id);
     note.status = 'processing';
     Store.saveNote(note);
 
     try {
+      const ping = await fetch(`${workerUrl}/ping`, { headers: { 'X-Passcode': passcode } });
+      if (!ping.ok) throw new Error(`Worker authentication/connectivity failed: HTTP ${ping.status}`);
+      const protocol = await ping.json();
+      if (protocol.api_version !== CONFIG.API_VERSION) throw new Error('Deploy the updated Worker (API 2) before processing notes.');
       // Build request body
       const body = {
         note_id: note.id,
         mode: note.input.mode,
-        // Reprocessing always starts from pristine original + chronological context.
-        // The current Worker accepts this as raw_text; Checkpoint 4 formalises the contract.
+        api_version: CONFIG.API_VERSION,
+        transcription_prompt: Store.getTranscriptionPrompt(),
+        created_at: note.created_at,
+        current_time: new Date().toISOString(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
         raw_text: _assembleReprocessText(note) || note.input.raw_text || null,
-        type_hint: note.user.type_override || null,
+        type_hint: note.input.reprocess_requested ? null : (note.user.type_override || null),
         existing_topics: _getExistingTopics(),
         clarification_answer: null,
         custom_prompt: Store.getPrompt() || null,
       };
 
       // Attach audio if present
-      if (note.input.audio_blob_key) {
+      if (note.input.audio_blob_key && !note.input.reprocess_requested) {
         const base64 = localStorage.getItem(note.input.audio_blob_key);
-        if (base64) body.audio_base64 = base64;
+        if (base64) {
+          body.audio_base64 = base64;
+          body.audio_mime_type = note.input.audio_mime_type || (base64.startsWith('AAAA') ? 'audio/mp4' : 'audio/webm');
+        }
       }
 
       const res = await fetch(`${workerUrl}/process`, {
@@ -435,23 +462,32 @@ const Queue = {
       }
 
       const data = await res.json();
+      const stored = Store.getNote(id);
+      if (!stored) return;
+      note.user = stored.user; // preserve edits saved while the request was in flight
+      // Persist a successful transcript even if subsequent structuring fails.
+      const transcript = data.result?.transcript || data.transcript;
+      if (transcript && !note.input.original_text && !note.input.reprocess_requested) {
+        note.input.raw_text = transcript;
+        note.input.original_text = transcript;
+        const audioKey = note.input.audio_blob_key;
+        note.input.audio_blob_key = null;
+        Store.saveNote(note);
+        if (audioKey) localStorage.removeItem(audioKey);
+      }
 
       if (data.status === 'ok' && data.result) {
-        // Store the first transcript as the pristine original.
-        // On later reprocesses the Worker echoes assembled original + context;
-        // never let that overwrite the locked original/raw capture.
-        if (data.result.transcript && !note.input.original_text) {
-          note.input.raw_text = data.result.transcript;
-          note.input.original_text = data.result.transcript;
-        }
-
+        if (!Store.getNote(id)) return; // deleted while processing
+        if (note.input.reprocess_requested) _clearUserEditsForReprocess(note);
+        note.input.reprocess_requested = false;
         _applyAiResult(note, data.result);
+        _recordQuestion(note);
         note.status = data.result.clarification_needed ? 'needs_context' : 'done';
         note.sync.pending = false;
         note.sync.last_error = null;
 
         // Clean up stored audio blob once transcribed
-        if (note.input.audio_blob_key) {
+        if (note.input.audio_blob_key && body.audio_base64) {
           localStorage.removeItem(note.input.audio_blob_key);
           note.input.audio_blob_key = null;
         }
@@ -470,11 +506,15 @@ const Queue = {
       console.warn('Queue: Worker call failed for', id, err);
       const fresh = Store.getNote(id);
       if (fresh) {
-        fresh.status = 'raw';
         fresh.sync.retry_count = (fresh.sync.retry_count || 0) + 1;
+        fresh.status = fresh.sync.retry_count >= CONFIG.MAX_RETRIES ? 'error' : 'raw';
         fresh.sync.last_error = err.message;
         Store.saveNote(fresh);
       }
+    } finally {
+      this.active.delete(id);
+      UI.updatePendingBadge();
+      if (document.getElementById('screen-notes').classList.contains('active')) Render.renderNotesList();
     }
   },
 
@@ -516,7 +556,9 @@ function _applyAiResult(note, result) {
   // { result, transcript }. Everything else (type, summary, topic, fields,
   // clarification) is left as-is/empty — no extra routing is forced.
   if (typeof result.result === 'string') {
-    note.ai.type               = note.ai.type || 'note';
+    note.ai.type               = 'note';
+    note.ai.topics = [];
+    note.ai.topic = '';
     note.ai.type_confidence    = 'high';
     note.ai.cleaned_text       = result.result || note.input.raw_text;
     note.ai.summary            = '';
@@ -622,22 +664,24 @@ function _getExistingTopics() {
   return topics.slice(0, 20);
 }
 
-/** Build the exact text used for reprocessing: pristine original + all context in order. */
+/** Latest user-approved reprocessing text takes priority over historical source. */
 function _assembleReprocessText(note) {
+  if (typeof note.input?.processing_text === 'string') return note.input.processing_text;
   const original = note.input?.original_text || note.input?.raw_text || '';
   const entries = Array.isArray(note.context) ? note.context : [];
-  if (!entries.length) return original;
-
-  const parts = [`Original:\n${original}`];
-  entries.forEach(entry => {
-    if (entry.source === 'ai_question' && entry.question) {
-      parts.push(`AI asked: ${entry.question}\nUser answered: ${entry.text || ''}`);
-    } else {
-      parts.push(`User added: ${entry.text || ''}`);
-    }
-  });
-  return parts.join('\n\n');
+  const oldContext = entries.filter(e => e.text && e.source !== 'ai_question_only');
+  return [original, ...oldContext.map(e => `User added: ${e.text}`)].filter(Boolean).join('\n\n');
 }
+
+function _recordQuestion(note) {
+  if (!note.ai.clarification_needed || !note.ai.clarification_question) return;
+  note.context = note.context || [];
+  const last = [...note.context].reverse().find(e => e.source === 'ai_question_only');
+  if (last?.text === note.ai.clarification_question) return;
+  note.context.push({ id: crypto.randomUUID(), at: new Date().toISOString(), source: 'ai_question_only', text: note.ai.clarification_question });
+}
+
+function _questionKey(note) { return note.ai?.clarification_question || ''; }
 
 /** Clear user-owned AI-derived edits before a deliberate reprocess.
  *  Hand-added/removed tags are intentionally preserved. */
@@ -693,7 +737,7 @@ const Render = {
     if (this.currentSearch) {
       const q = this.currentSearch.toLowerCase();
       notes = notes.filter(n =>
-        [n.input.raw_text, _getFinalCleanedText(n), _getFinalSummary(n),
+        [n.input.original_text, n.input.raw_text, ...(n.context || []).map(e => e.text), _getFinalCleanedText(n), _getFinalSummary(n),
          ..._getFinalTags(n), ...Object.values(_getFinalFields(n))]
           .some(v => String(v || '').toLowerCase().includes(q))
       );
@@ -721,7 +765,7 @@ function _noteCardHTML(note) {
   const summary = _getFinalSummary(note) || _getFinalCleanedText(note) || note.input.raw_text || '(no content)';
   const time    = _relativeTime(note.created_at);
 
-  const needsCtx  = note.status === 'needs_context' ? 'needs-context' : '';
+  const needsCtx  = note.status === 'needs_context' && note.user?.dismissed_question_id !== _questionKey(note) ? 'needs-context' : '';
   const isPending = note.sync.pending ? 'pending' : '';
 
   return `
@@ -745,10 +789,20 @@ const Modal = {
   currentId: null,
   openSnapshot: null,
 
+  requestClose(fromBack = false) {
+    if (this.hasUnsavedChanges() && !confirm('Discard unsaved changes?')) {
+      if (fromBack) history.pushState({ ncNote: this.currentId }, '');
+      return;
+    }
+    this.close(fromBack);
+  },
+
   open(id) {
     const note = Store.getNote(id);
     if (!note) return;
     this.currentId = id;
+    this.previousFocus = document.activeElement;
+    history.pushState({ ncNote: id }, '');
 
     const type = _getFinalType(note);
     const tags = _getFinalTags(note);
@@ -782,14 +836,18 @@ const Modal = {
     document.getElementById('modal-note').classList.remove('hidden');
     document.body.style.overflow = 'hidden';
     this.openSnapshot = this._formSnapshot();
+    document.querySelector('.modal-content').scrollTop = 0;
+    document.getElementById('modal-close').focus();
   },
 
-  close() {
+  close(fromBack = false) {
+    if (!fromBack && history.state?.ncNote === this.currentId) history.back();
     this.currentId = null;
     this.openSnapshot = null;
     AudioPlayer.hide();
     document.getElementById('modal-note').classList.add('hidden');
     document.body.style.overflow = '';
+    this.previousFocus?.focus();
   },
 
   _formSnapshot() {
@@ -810,9 +868,10 @@ const Modal = {
     return this.openSnapshot !== null && this._formSnapshot() !== this.openSnapshot;
   },
 
-  save() {
+  save(closeAfter = true) {
     const note = Store.getNote(this.currentId);
     if (!note) return;
+    if (Queue.active.has(note.id) && note.input.reprocess_requested) { UI.showToast('Wait for reprocessing to finish before saving', 'error'); return; }
 
     const selectedType = document.getElementById('modal-type').value;
     const selectedTags = document.getElementById('modal-topic').value
@@ -844,9 +903,12 @@ const Modal = {
     note.user.fields = userFields;
 
     Store.saveNote(note);
-    this.close();
-    Render.renderNotesList();
-    UI.showToast('Saved', 'ok');
+    this.openSnapshot = this._formSnapshot();
+    if (closeAfter) {
+      this.close();
+      Render.renderNotesList();
+      UI.showToast('Saved', 'ok');
+    }
   },
 
   delete() {
@@ -857,68 +919,31 @@ const Modal = {
     UI.showToast('Deleted');
   },
 
-  /** Re-run AI from pristine original + all saved context. */
+  /** Reprocess current Cleaned, saving the exact source before requesting AI. */
   reprocess() {
-    const note = Store.getNote(this.currentId);
+    let note = Store.getNote(this.currentId);
     if (!note) return;
-
-    if (this.hasUnsavedChanges() &&
-        !confirm('You have unsaved edits. Reprocessing will discard them. Continue?')) {
-      return;
+    if (Queue.active.has(note.id)) { UI.showToast('This note is still processing. Try again when it finishes.'); return; }
+    const cleaned = document.getElementById('modal-cleaned').value.trim();
+    if (!cleaned) { UI.showToast('Enter text in Cleaned first', 'error'); return; }
+    this.save(false);
+    note = Store.getNote(this.currentId);
+    note.context = note.context || [];
+    if (note.input.processing_text !== cleaned) {
+      note.context.push({ id: crypto.randomUUID(), at: new Date().toISOString(), source: 'user_revision', text: cleaned });
     }
-
-    _clearUserEditsForReprocess(note);
-    note.ai.clarification_dismissed = false;
+    note.input.processing_text = cleaned;
+    note.input.reprocess_requested = true;
     note.status = 'raw';
     note.sync.pending = true;
     note.sync.retry_count = 0;
     note.sync.last_error = null;
-
     Store.saveNote(note);
     Store.addPending(note.id);
     this.close();
+    Render.renderNotesList();
     Queue.processNote(note.id);
-    UI.showToast('Reprocessing…');
-  },
-
-  /** Add one chronological context entry, then reprocess. */
-  addContextAndReprocess() {
-    const note = Store.getNote(this.currentId);
-    const text = document.getElementById('context-input').value.trim();
-    if (!note || !text) return;
-
-    if (this.hasUnsavedChanges() &&
-        !confirm('You have unsaved edits. Reprocessing will discard them. Continue?')) {
-      return;
-    }
-
-    const hasQuestion = !!(
-      note.ai.clarification_needed &&
-      !note.ai.clarification_dismissed &&
-      note.ai.clarification_question
-    );
-
-    note.context = Array.isArray(note.context) ? note.context : [];
-    note.context.push({
-      id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      at: new Date().toISOString(),
-      source: hasQuestion ? 'ai_question' : 'manual',
-      question: hasQuestion ? note.ai.clarification_question : null,
-      text,
-    });
-
-    _clearUserEditsForReprocess(note);
-    note.ai.clarification_dismissed = false;
-    note.status = 'raw';
-    note.sync.pending = true;
-    note.sync.retry_count = 0;
-    note.sync.last_error = null;
-
-    Store.saveNote(note);
-    Store.addPending(note.id);
-    this.close();
-    Queue.processNote(note.id);
-    UI.showToast('Context added — reprocessing…');
+    UI.showToast('Saved — reprocessing…');
   },
 
   /** Hide the current needs-context state without deleting the AI question. */
@@ -926,7 +951,7 @@ const Modal = {
     const note = Store.getNote(this.currentId);
     if (!note) return;
 
-    note.ai.clarification_dismissed = true;
+    note.user.dismissed_question_id = _questionKey(note);
     if (note.status === 'needs_context') note.status = 'done';
     Store.saveNote(note);
 
@@ -938,12 +963,21 @@ const Modal = {
   _renderHistory(note) {
     const original = note.input.original_text || note.input.raw_text || '';
     document.getElementById('modal-original-meta').textContent =
-      `[original · ${_historyTime(note.created_at)}]`;
-    document.getElementById('modal-original-text').textContent = original || '(empty)';
+      `Original · ${_historyTime(note.created_at)}`;
+    const originalEl = document.getElementById('modal-original-text');
+    originalEl.textContent = original || '(empty)';
+    originalEl.classList.add('original-collapsed');
+    const toggle = document.getElementById('modal-original-toggle');
+    toggle.textContent = 'Show more';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.classList.toggle('hidden', original.length < 180 && original.split('\n').length <= 3);
+    requestAnimationFrame(() => toggle.classList.toggle('hidden', originalEl.scrollHeight <= originalEl.clientHeight + 1));
 
     const history = document.getElementById('modal-context-history');
     const entries = Array.isArray(note.context) ? note.context : [];
 
+    document.getElementById('modal-history-details').classList.toggle('hidden', !entries.length);
+    document.getElementById('modal-history-details').open = false;
     history.innerHTML = entries.map(entry => {
       if (entry.source === 'ai_question') {
         return `
@@ -956,7 +990,7 @@ const Modal = {
       }
       return `
         <div class="context-entry">
-          <div class="history-label">[You added · ${escHtml(_historyTime(entry.at))}]</div>
+          <div class="history-label">[${entry.source === 'user_revision' ? 'You reprocessed' : entry.source === 'ai_question_only' ? 'AI asked' : 'You added'} · ${escHtml(_historyTime(entry.at))}]</div>
           <div class="history-text">${escHtml(entry.text || '')}</div>
         </div>`;
     }).join('');
@@ -967,20 +1001,20 @@ const Modal = {
     if (!wrap) return;
     const hasQuestion = !!(
       note.ai.clarification_needed &&
-      !note.ai.clarification_dismissed &&
+      note.user?.dismissed_question_id !== _questionKey(note) &&
       note.ai.clarification_question
     );
 
     if (hasQuestion) {
       document.getElementById('context-question').textContent = note.ai.clarification_question;
-      document.getElementById('context-input').placeholder = 'Answer the AI question…';
+      document.getElementById('context-panel').classList.remove('hidden');
       wrap.classList.remove('hidden');
     } else {
       document.getElementById('context-question').textContent = '';
-      document.getElementById('context-input').placeholder = 'Add context…';
+      document.getElementById('context-panel').classList.add('hidden');
       wrap.classList.add('hidden');
     }
-    document.getElementById('context-input').value = '';
+
   },
 
   /** Render dynamic fields based on the note type */
@@ -1131,7 +1165,7 @@ const Diagnostics = {
     document.getElementById('diag-summary').textContent = '';
     document.getElementById('diag-summary').className   = 'diag-summary';
 
-    const checks = ['worker','auth','groq-key','groq-model','groq-whisper','gemini'];
+    const checks = ['worker','auth','groq-key','groq-model','groq-whisper'];
     checks.forEach(k => {
       document.getElementById(`diag-${k}-icon`).textContent   = '○';
       document.getElementById(`diag-${k}-icon`).className     = 'diag-icon pending';
@@ -1141,7 +1175,7 @@ const Diagnostics = {
     // Step 1: Worker URL set?
     if (!workerUrl) {
       this._row('worker', false, 'No Worker URL — add it in Settings above');
-      this._abort(['auth','groq-key','groq-model','groq-whisper','gemini']);
+      this._abort(['auth','groq-key','groq-model','groq-whisper']);
       this._summary(false, 'Add your Worker URL first.');
       return;
     }
@@ -1151,7 +1185,7 @@ const Diagnostics = {
       const res = await fetch(`${workerUrl}/ping`, { method: 'GET' });
       if (res.status === 404) {
         this._row('worker', false, '/ping route missing — redeploy the latest worker.js');
-        this._abort(['auth','groq-key','groq-model','groq-whisper','gemini']);
+        this._abort(['auth','groq-key','groq-model','groq-whisper']);
         this._summary(false, 'Redeploy worker.js — the /ping route is missing.');
         return;
       }
@@ -1159,7 +1193,7 @@ const Diagnostics = {
       this._row('worker', true, `Reachable at ${workerUrl}`);
     } catch (err) {
       this._row('worker', false, `Cannot reach Worker: ${err.message}`);
-      this._abort(['auth','groq-key','groq-model','groq-whisper','gemini']);
+      this._abort(['auth','groq-key','groq-model','groq-whisper']);
       this._summary(false, 'Check your Worker URL and that the Worker is deployed.');
       return;
     }
@@ -1167,7 +1201,7 @@ const Diagnostics = {
     // Step 3: Passcode works?
     if (!passcode) {
       this._row('auth', false, 'No passcode stored — enter it on the lock screen');
-      this._abort(['groq-key','groq-model','groq-whisper','gemini']);
+      this._abort(['groq-key','groq-model','groq-whisper']);
       this._summary(false, 'Enter your passcode on the lock screen first.');
       return;
     }
@@ -1180,17 +1214,17 @@ const Diagnostics = {
         this._row('auth', true, 'Passcode accepted');
       } else if (res.status === 401) {
         this._row('auth', false, 'Passcode rejected — update it in Settings to match PASSCODE in your Worker env vars');
-        this._abort(['groq-key','groq-model','groq-whisper','gemini']);
+        this._abort(['groq-key','groq-model','groq-whisper']);
         this._summary(false, 'Wrong passcode. Update it in Settings or in your Cloudflare Worker variables.');
         return;
       } else {
         this._row('auth', false, `Unexpected response: HTTP ${res.status}`);
-        this._abort(['groq-key','groq-model','groq-whisper','gemini']);
+        this._abort(['groq-key','groq-model','groq-whisper']);
         return;
       }
     } catch (err) {
       this._row('auth', false, `Auth check failed: ${err.message}`);
-      this._abort(['groq-key','groq-model','groq-whisper','gemini']);
+      this._abort(['groq-key','groq-model','groq-whisper']);
       return;
     }
 
@@ -1203,7 +1237,7 @@ const Diagnostics = {
 
       if (res.status === 404) {
         this._row('groq-key',     false, '/diagnose route missing — redeploy the latest worker.js');
-        this._abort(['groq-model','groq-whisper','gemini']);
+        this._abort(['groq-model','groq-whisper']);
         this._summary(false, 'Redeploy worker.js — the /diagnose route is missing.');
         return;
       }
@@ -1214,23 +1248,22 @@ const Diagnostics = {
       this._row('groq-key',     r.groq_key?.ok,     r.groq_key?.detail     || '—');
       this._row('groq-model',   r.groq_model?.ok,   r.groq_model?.detail   || '—');
       this._row('groq-whisper', r.groq_whisper?.ok, r.groq_whisper?.detail || '—');
-      this._row('gemini',       r.gemini?.ok,       r.gemini?.detail       || '—');
+      
 
-      const anyAi = r.groq_model?.ok || r.gemini?.ok;
+      const anyAi = r.groq_model?.ok;
       if (!r.groq_key?.ok) {
         this._summary(false, 'Groq API key invalid — get a new one at console.groq.com and update GROQ_API_KEY in your Worker env vars.');
       } else if (!anyAi) {
-        this._summary(false, 'Both AI providers failing — notes cannot be structured. Check both API keys.');
+        this._summary(false, 'Groq chat is failing — notes cannot be structured. Check the diagnostic above.');
       } else if (!r.groq_whisper?.ok) {
         this._summary(false, 'Voice transcription failing — voice notes will not process. Text notes still work.');
-      } else if (!r.groq_model?.ok) {
-        this._summary(false, 'Groq chat failing but Gemini fallback works — notes will be structured via Gemini.');
+
       } else {
         this._summary(true, 'Everything looks good. If notes still queue, hit Retry all pending.');
       }
     } catch (err) {
       this._row('groq-key',     false, `Diagnose request failed: ${err.message}`);
-      this._abort(['groq-model','groq-whisper','gemini']);
+      this._abort(['groq-model','groq-whisper']);
       this._summary(false, 'Could not reach /diagnose — make sure the latest worker.js is deployed.');
     }
   },
@@ -1267,6 +1300,7 @@ const Settings = {
   load() {
     document.getElementById('setting-worker-url').value = Store.getWorkerUrl();
     this.loadPrompt();
+    document.getElementById('setting-transcription-prompt').value = Store.getTranscriptionPrompt();
 
     // Show pending queue details including last errors
     const pendingIds = Store.getPending();
@@ -1282,7 +1316,7 @@ const Settings = {
       const retries = n.sync.retry_count ? ` (tried ${n.sync.retry_count}x)` : '';
       return `${n.id.slice(0,8)}… retries:${n.sync.retry_count}${err}`;
     });
-    el.innerHTML = `${pendingIds.length} pending:<br><small style="opacity:0.7">${details.join('<br>')}</small>`;
+    el.innerHTML = `${pendingIds.length} pending:<br><small style="opacity:0.7">${details.map(escHtml).join('<br>')}</small>`;
   },
 
   saveWorkerUrl() {
@@ -1303,6 +1337,23 @@ const Settings = {
     if (!confirm('Delete ALL notes and settings? This cannot be undone.')) return;
     Store.clearAll();
     location.reload();
+  },
+
+  async loadDefaultPrompts() {
+    const status = document.getElementById('default-prompt-status');
+    status.textContent = 'Loading deployed default prompts…';
+    document.getElementById('default-processing-prompt').textContent = '';
+    document.getElementById('default-transcription-prompt').textContent = '';
+    const url = Store.getWorkerUrl();
+    if (!url) { status.textContent = 'Set your Worker URL first.'; return; }
+    try {
+      const res = await fetch(`${url}/prompts`, { headers: { 'X-Passcode': Store.getPasscode() } });
+      if (!res.ok) throw new Error(res.status === 404 ? 'Deploy the updated Worker to enable prompt viewing.' : `Worker returned HTTP ${res.status}`);
+      const data = await res.json();
+      document.getElementById('default-processing-prompt').textContent = data.processing_prompt;
+      document.getElementById('default-transcription-prompt').textContent = data.transcription_prompt;
+      status.textContent = `Deployed Worker defaults · API ${data.api_version}`;
+    } catch (err) { status.textContent = err.message; }
   },
 
   /** Populate the prompt textarea + status line from storage. */
@@ -1489,11 +1540,20 @@ function init() {
   });
 
   // ── Modal actions
-  document.getElementById('modal-backdrop').addEventListener('click', () => Modal.close());
+  document.getElementById('modal-backdrop').addEventListener('click', () => Modal.requestClose());
+  document.getElementById('modal-close').addEventListener('click', () => Modal.requestClose());
+  window.addEventListener('popstate', () => { if (Modal.currentId) Modal.requestClose(true); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && Modal.currentId) Modal.requestClose(); });
+  document.getElementById('modal-original-toggle').addEventListener('click', e => {
+    const expanded = e.currentTarget.getAttribute('aria-expanded') !== 'true';
+    e.currentTarget.setAttribute('aria-expanded', String(expanded));
+    e.currentTarget.textContent = expanded ? 'Show less' : 'Show more';
+    document.getElementById('modal-original-text').classList.toggle('original-collapsed', !expanded);
+  });
   document.getElementById('modal-save').addEventListener('click',      () => Modal.save());
   document.getElementById('modal-reprocess')?.addEventListener('click', () => Modal.reprocess());
   document.getElementById('modal-delete').addEventListener('click',    () => Modal.delete());
-  document.getElementById('context-submit')?.addEventListener('click',  () => Modal.addContextAndReprocess());
+
   document.getElementById('context-dismiss')?.addEventListener('click', () => Modal.dismissContextQuestion());
 
   // Auto-save Worker URL when it changes — also retry pending notes
@@ -1507,6 +1567,27 @@ function init() {
     });
     Queue.drainQueue(true);
     setTimeout(() => Settings.load(), 1500);
+  });
+
+  document.querySelectorAll('.password-eye').forEach(btn => btn.addEventListener('click', () => {
+    const input = btn.parentElement.querySelector('input');
+    const show = input.type === 'password';
+    input.type = show ? 'text' : 'password';
+    btn.setAttribute('aria-pressed', String(show));
+    btn.setAttribute('aria-label', show ? 'Hide passcode' : 'Show passcode');
+    btn.title = show ? 'Hide passcode' : 'Show passcode';
+  }));
+  document.getElementById('default-prompt-panel').addEventListener('toggle', e => {
+    if (e.target.open) Settings.loadDefaultPrompts();
+  });
+  document.getElementById('setting-transcription-save').addEventListener('click', () => {
+    Store.setTranscriptionPrompt(document.getElementById('setting-transcription-prompt').value.trim());
+    UI.showToast('Transcription guidance saved', 'ok');
+  });
+  document.getElementById('setting-transcription-reset').addEventListener('click', () => {
+    localStorage.removeItem(CONFIG.KEYS.TRANSCRIPTION_PROMPT);
+    document.getElementById('setting-transcription-prompt').value = Store.getTranscriptionPrompt();
+    UI.showToast('Default guidance restored', 'ok');
   });
 
   // ── Settings actions

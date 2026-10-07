@@ -2,12 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, " />
   <meta name="theme-color" content="#0a0a0a" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>NoteCapture</title>
-  <link rel="stylesheet" href="styles.css?v=stage1-cp3b" />
+  <link rel="stylesheet" href="styles.css?v=ui-reprocess-2" />
 </head>
 <body>
 
@@ -18,13 +18,13 @@
       <div class="gate-logo">⬡</div>
       <h1 class="gate-title">NoteCapture</h1>
       <p class="gate-sub">Enter your Worker passcode to continue</p>
-      <input
+      <div class="password-wrap"><input
         id="passcode-input"
         class="gate-input"
         type="password"
         placeholder="Passcode"
         autocomplete="current-password"
-      />
+      /><button class="password-eye" type="button" aria-label="Show passcode" aria-pressed="false" title="Show passcode"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path class="eye-slash" d="m3 3 18 18" stroke="currentColor" stroke-width="2"/></svg></button></div>
       <button id="passcode-submit" class="gate-btn">Unlock</button>
       <p id="passcode-error" class="gate-error hidden">Incorrect passcode. Try again.</p>
     </div>
@@ -139,39 +139,15 @@
   <div id="modal-note" class="modal hidden" role="dialog" aria-modal="true" aria-label="Note detail">
     <div class="modal-backdrop" id="modal-backdrop"></div>
     <div class="modal-sheet">
-      <div class="modal-handle"></div>
+      <div class="modal-header"><span>Note</span><button id="modal-close" type="button" class="modal-secondary-btn">Close ×</button></div>
 
-      <!-- Type + topic row -->
-      <div class="modal-meta">
-        <select id="modal-type" class="modal-select">
-          <option value="todo">To-do</option>
-          <option value="reminder">Reminder</option>
-          <option value="schedule">Schedule</option>
-          <option value="idea">Idea</option>
-          <option value="research">Research</option>
-          <option value="note">Note</option>
-        </select>
-        <input id="modal-topic" class="modal-topic-input" type="text" placeholder="topic tag" />
-      </div>
-
+      <div class="modal-content">
       <!-- Original capture + chronological context history -->
       <div class="modal-history">
         <div id="modal-original-meta" class="history-label"></div>
-        <div id="modal-original-text" class="history-text"></div>
-        <div id="modal-context-history" class="context-history"></div>
-      </div>
-
-      <!-- One context box: answers AI questions or adds manual context -->
-      <div id="context-panel" class="context-panel">
-        <div id="context-question-wrap" class="context-question-wrap hidden">
-          <span class="clarif-icon">?</span>
-          <div class="clarif-body">
-            <p id="context-question" class="clarif-q"></p>
-            <button id="context-dismiss" class="context-dismiss-btn" type="button">Dismiss</button>
-          </div>
-        </div>
-        <textarea id="context-input" class="clarif-input" placeholder="Add context…" rows="2"></textarea>
-        <button id="context-submit" class="clarif-btn" type="button">Add context & reprocess</button>
+        <div id="modal-original-text" class="history-text original-collapsed" dir="auto"></div>
+        <button id="modal-original-toggle" class="text-toggle hidden" type="button" aria-expanded="false" aria-controls="modal-original-text">Show more</button>
+        <details id="modal-history-details" class="hidden"><summary>Earlier changes</summary><div id="modal-context-history" class="context-history"></div></details>
       </div>
 
       <!-- Audio player — visible only for unprocessed voice notes with saved blob -->
@@ -193,11 +169,40 @@
       </div>
 
       <!-- Main editable fields -->
+      <label class="box-label" for="modal-cleaned">Cleaned</label>
       <textarea id="modal-cleaned" class="modal-textarea" placeholder="Note content…" rows="5"></textarea>
+      <label class="box-label" for="modal-summary">Summary</label>
       <input id="modal-summary" class="modal-summary-input" type="text" placeholder="Summary…" />
+
+      <!-- Type + topic row -->
+      <div class="modal-meta">
+        <select aria-label="Classification" id="modal-type" class="modal-select">
+          <option value="todo">To-do</option>
+          <option value="reminder">Reminder</option>
+          <option value="schedule">Schedule</option>
+          <option value="idea">Idea</option>
+          <option value="research">Research</option>
+          <option value="note">Note</option>
+        </select>
+        <input id="modal-topic" class="modal-topic-input" type="text" placeholder="hotel, maintenance" aria-label="Tags" />
+      </div>
+
+      <p class="settings-hint">Tags: separate each tag with a comma.</p>
 
       <!-- Dynamic fields (deadline, priority, location, etc.) -->
       <div id="modal-fields" class="modal-fields"></div>
+
+      <!-- AI clarification; answers are entered in Cleaned -->
+      <div id="context-panel" class="context-panel hidden">
+        <div id="context-question-wrap" class="context-question-wrap hidden">
+          <span class="clarif-icon">?</span>
+          <div class="clarif-body">
+            <p id="context-question" class="clarif-q"></p>
+            <button id="context-dismiss" class="context-dismiss-btn" type="button">Dismiss</button>
+          </div>
+        </div>
+        <p class="settings-hint">Add your answer in Cleaned, then press Reprocess.</p>
+      </div>
 
       <!-- Timestamps -->
       <p id="modal-timestamps" class="modal-timestamps"></p>
@@ -209,6 +214,7 @@
       </div>
       <div class="modal-actions">
         <button id="modal-delete" class="modal-delete-btn">Delete</button>
+      </div>
       </div>
     </div>
   </div>
@@ -226,7 +232,7 @@
 
       <section class="settings-section">
         <h3 class="settings-label">Passcode</h3>
-        <input id="setting-passcode" class="settings-input" type="password" placeholder="New passcode" />
+        <div class="password-wrap"><input id="setting-passcode" class="settings-input" type="password" placeholder="New passcode" /><button class="password-eye" type="button" aria-label="Show passcode" aria-pressed="false" title="Show passcode"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path class="eye-slash" d="m3 3 18 18" stroke="currentColor" stroke-width="2"/></svg></button></div>
         <button id="setting-passcode-save" class="settings-btn">Update passcode</button>
       </section>
 
@@ -236,10 +242,17 @@
         <button id="setting-retry-all" class="settings-btn">Retry all pending</button>
       </section>
 
+      <section class="settings-section">
+        <label class="settings-label" for="setting-transcription-prompt">Transcription guidance</label>
+        <p class="settings-hint">Automatic language detection for mixed speech. This guides transcription separately from your AI processing prompt.</p>
+        <textarea id="setting-transcription-prompt" class="settings-prompt-textarea" rows="4"></textarea>
+        <div class="settings-prompt-actions"><button id="setting-transcription-save" class="settings-btn">Save guidance</button><button id="setting-transcription-reset" class="settings-btn">Reset guidance</button></div>
+      </section>
       <!-- Prompt editor — shows active prompt, allows override -->
       <section class="settings-section">
         <h3 class="settings-label">AI Prompt</h3>
         <p class="settings-hint" id="setting-prompt-status">Loading…</p>
+        <div class="prompt-columns"><div>
         <textarea
           id="setting-prompt"
           class="settings-prompt-textarea"
@@ -251,13 +264,14 @@
           <button id="setting-prompt-save"  class="settings-btn">Save custom prompt</button>
           <button id="setting-prompt-reset" class="settings-btn">Reset to default</button>
         </div>
+        </div><details id="default-prompt-panel"><summary>View default prompts</summary><p id="default-prompt-status" class="settings-hint" role="status"></p><h4 class="box-label">Processing prompt</h4><pre id="default-processing-prompt" class="prompt-preview"></pre><h4 class="box-label">Transcription guidance</h4><pre id="default-transcription-prompt" class="prompt-preview"></pre></details></div>
         <p class="settings-hint">A custom prompt fully replaces the default behaviour — no tagging, summarising, topic-matching or clarifying questions run. You just get back whatever your prompt produces, shown as the note's text, plus the original transcript. Reset to go back to the Worker default. Changes apply to the next note processed.</p>
       </section>
 
       <!-- ── DIAGNOSTICS ── Tests each part of the pipeline ── -->
       <section class="settings-section">
         <h3 class="settings-label">Diagnostics</h3>
-        <p class="settings-hint">Tests Worker, passcode, Groq, Whisper and Gemini. Run this when something isn't working.</p>
+        <p class="settings-hint">Tests Worker, passcode, Groq and Whisper. Run this when something isn't working.</p>
         <button id="setting-diagnose" class="settings-btn">Run diagnostics</button>
 
         <div id="diag-panel" class="diag-panel hidden">
@@ -296,14 +310,7 @@
               <span class="diag-detail" id="diag-groq-whisper-detail">—</span>
             </div>
           </div>
-          <div class="diag-row" id="diag-gemini">
-            <span class="diag-icon" id="diag-gemini-icon">○</span>
-            <div class="diag-body">
-              <span class="diag-label">Gemini fallback</span>
-              <span class="diag-detail" id="diag-gemini-detail">—</span>
-            </div>
-          </div>
-          <p id="diag-summary" class="diag-summary"></p>
+<p id="diag-summary" class="diag-summary"></p>
         </div>
       </section>
 
@@ -350,6 +357,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=stage1-cp3b"></script>
+  <script src="app.js?v=ui-reprocess-2"></script>
 </body>
 </html>
