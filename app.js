@@ -32,7 +32,7 @@ const CONFIG = {
   },
 
   API_VERSION: 2,
-  DEFAULT_TRANSCRIPTION_PROMPT: 'Mixed English, Urdu and Arabic speech. Use Latin letters for English, Urdu script for Urdu, and Arabic script for Arabic; no Hindi or Punjabi. Examples: Please کل صبح meeting رکھ دیں۔ الحمد لله، I will call tomorrow. ہوٹل کی maintenance check کرنی ہے۔',
+  DEFAULT_TRANSCRIPTION_PROMPT: 'Kal subah meeting hai, please time confirm kar dein. Mujhe hotel ki maintenance check karni hai. Alhamdulillah, everything is fine. In sha Allah, I will call tomorrow.',
 
   // How often the retry queue runs (ms)
   QUEUE_INTERVAL_MS: 60_000,

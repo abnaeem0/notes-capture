@@ -1,7 +1,7 @@
 /** NoteCapture stateless Worker. Keep PASSCODE and GROQ_API_KEY in Cloudflare secrets. */
 const API_VERSION = 2;
-const WORKER_VERSION = 'ui-reprocess-2';
-const DEFAULT_TRANSCRIPTION_PROMPT = 'Mixed English, Urdu and Arabic speech. Use Latin letters for English, Urdu script for Urdu, and Arabic script for Arabic; no Hindi or Punjabi. Examples: Please کل صبح meeting رکھ دیں۔ الحمد لله، I will call tomorrow. ہوٹل کی maintenance check کرنی ہے۔';
+const WORKER_VERSION = 'english-cleaned-3';
+const DEFAULT_TRANSCRIPTION_PROMPT = 'Kal subah meeting hai, please time confirm kar dein. Mujhe hotel ki maintenance check karni hai. Alhamdulillah, everything is fine. In sha Allah, I will call tomorrow.';
 const DEFAULT_PROCESSING_PROMPT = `You are a personal note classification assistant.
 The input may mix English, Urdu and Arabic. The speaker does not use Hindi or Punjabi.
 Return cleaned_text, summary, clarification_question and descriptive fields in English.
@@ -16,7 +16,19 @@ Choose exactly one type:
  note — other information or observations.
 
 Rules:
-1. Clean wording, transcription noise, filler and grammar without changing meaning.
+1. cleaned_text: understand the entire note and rewrite it as clear, coherent, natural English.
+Translate all Urdu, Arabic and Roman Urdu/Arabic content into English on the first pass;
+do not merely copy the transcript, transliterate it, or tidy its original language.
+Remove filler, false starts, rambling and redundant repetition. Organize related thoughts
+into sensible sentences and short paragraphs so the note reads naturally.
+Preserve every substantive fact, distinct idea, action, name, number, date, condition,
+uncertainty and intention. This is a complete rewritten note, not a short summary.
+When the speaker explicitly corrects themselves, use the final intended correction.
+Do not invent facts or guess the meaning of unclear wording. Keep uncertainty clear
+and use clarification_question for an important unresolved ambiguity.
+Write names and proper nouns in readable Latin letters when necessary. Translate the
+meaning of Arabic expressions into natural English. Do not leave Urdu/Arabic sentences
+in cleaned_text. If the source is already English, still remove rambling and improve coherence.
 2. Summary: one sentence, at most 15 words. No "the user wants to" filler.
 3. topics: 1–4 relevant tags, lowercase, trim and collapse spaces, no duplicates.
 Prefer existing meaningful tags to synonymous new tags; never add tags to reach four.
@@ -128,7 +140,7 @@ async function callGroq(prompt, apiKey) {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'openai/gpt-oss-20b', reasoning_effort: 'low', include_reasoning: false,
+        model: 'openai/gpt-oss-20b', reasoning_effort: 'medium', include_reasoning: false,
         temperature: 0.2, max_tokens: 4096, response_format: { type: 'json_object' },
         messages: [{ role: 'system', content: prompt.systemPrompt }, { role: 'user', content: prompt.userMessage }],
       }),
@@ -162,7 +174,7 @@ async function handleDiagnose(env, corsHeaders) {
         headers: { 'Authorization': `Bearer ${env.GROQ_API_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: 'openai/gpt-oss-20b',
-          reasoning_effort: 'low',
+          reasoning_effort: 'medium',
           include_reasoning: false,
           max_tokens: 2048,
           messages: [{ role: 'user', content: 'Reply with the word OK only. No other text.' }],
