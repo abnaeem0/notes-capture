@@ -1316,3 +1316,7 @@ summary { color: var(--text-primary); cursor: pointer; padding: 12px 0; }
 
 .gate-wrap .password-wrap { max-width: 320px; }
 .modal-select, .modal-topic-input, .field-input { min-width: 0; }
+
+/* Search labels distinguish current content from original/history matches. */
+.search-match-label { font-size: 0.75rem; color: #99baff; margin: 6px 0 0; }
+#search-status { margin: 8px 0; min-height: 1.2em; }

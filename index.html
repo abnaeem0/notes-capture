@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>NoteCapture</title>
-  <link rel="stylesheet" href="styles.css?v=ui-reprocess-2" />
+  <link rel="stylesheet" href="styles.css?v=semantic-search-1" />
 </head>
 <body>
 
@@ -102,7 +102,8 @@
   <!-- ─── NOTES LIST SCREEN ─────────────────────────────────────── -->
   <div id="screen-notes" class="screen">
     <div class="list-header">
-      <input id="search-input" class="search-input" type="search" placeholder="Search notes…" />
+      <input id="search-input" class="search-input" type="search" placeholder="Search words or describe what you’re looking for…" aria-label="Search notes" />
+      <p id="search-status" class="settings-hint" role="status" aria-live="polite"></p>
       <div class="filter-tabs" id="filter-tabs">
         <button class="filter-tab active" data-type="all">All</button>
         <button class="filter-tab" data-type="todo">To-do</button>
@@ -314,6 +315,14 @@
         </div>
       </section>
 
+      <section class="settings-section">
+        <h3 class="settings-label">Semantic search</h3>
+        <p class="settings-hint">Find notes by meaning using Cloudflare. Current note text and searches are sent for embeddings; notes stay on this device. Keyword search works offline.</p>
+        <p id="setting-search-status" class="settings-hint" role="status">Search index updates automatically when online.</p>
+        <button id="setting-search-refresh" class="settings-btn">Refresh search index</button>
+        <p class="settings-hint">Setup: add a Workers AI binding named AI to your Cloudflare Worker, then redeploy.</p>
+      </section>
+
       <section class="settings-section danger-zone">
         <h3 class="settings-label">Danger zone</h3>
         <button id="setting-clear-all" class="settings-btn danger">Clear all data</button>
@@ -357,6 +366,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=english-cleaned-3"></script>
+  <script src="app.js?v=semantic-search-1"></script>
 </body>
 </html>

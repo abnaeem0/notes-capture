@@ -1,6 +1,6 @@
 /** NoteCapture stateless Worker. Keep PASSCODE and GROQ_API_KEY in Cloudflare secrets. */
 const API_VERSION = 2;
-const WORKER_VERSION = 'english-cleaned-3';
+const WORKER_VERSION = 'semantic-search-1';
 const DEFAULT_TRANSCRIPTION_PROMPT = 'Kal subah meeting hai, please time confirm kar dein. Mujhe hotel ki maintenance check karni hai. Alhamdulillah, everything is fine. In sha Allah, I will call tomorrow.';
 const DEFAULT_PROCESSING_PROMPT = `You are a personal note classification assistant.
 The input may mix English, Urdu and Arabic. The speaker does not use Hindi or Punjabi.
@@ -59,14 +59,46 @@ export default {
     if (!env.PASSCODE || request.headers.get('X-Passcode') !== env.PASSCODE) return json({ error: 'Unauthorised' }, 401, cors);
     const path = new URL(request.url).pathname;
     try {
-      if (request.method === 'GET' && path === '/ping') return json({ status: 'ok', api_version: API_VERSION, worker_version: WORKER_VERSION }, 200, cors);
+      if (request.method === 'GET' && path === '/ping') return json({ status: 'ok', api_version: API_VERSION, worker_version: WORKER_VERSION, semantic_search: !!env.AI, embedding_model: EMBEDDING_MODEL }, 200, cors);
       if (request.method === 'GET' && path === '/prompts') return json({ api_version: API_VERSION, processing_prompt: DEFAULT_PROCESSING_PROMPT, transcription_prompt: DEFAULT_TRANSCRIPTION_PROMPT }, 200, cors);
       if (request.method === 'GET' && path === '/diagnose') return handleDiagnose(env, cors);
+      if (request.method === 'POST' && path === '/embeddings') return await handleEmbeddings(request, env, cors);
       if (request.method === 'POST' && path === '/process') return await handleProcess(request, env, cors);
       return json({ error: 'Not found' }, 404, cors);
     } catch (err) { return json({ error: 'Internal server error', detail: err.message }, 500, cors); }
   },
 };
+
+const EMBEDDING_MODEL = '@cf/baai/bge-m3';
+
+/** Optional search endpoint. Does not persist notes or depend on Groq. */
+async function handleEmbeddings(request, env, cors) {
+  if (!env.AI) return json({ error: 'Add a Workers AI binding named AI to your Worker. Keyword search still works.' }, 503, cors);
+  let body;
+  // Reject oversized requests before parsing or invoking inference.
+  const raw = await request.text();
+  if (raw.length > 100000) return json({ error: 'Embedding request too large' }, 413, cors);
+  try { body = JSON.parse(raw); } catch { return json({ error: 'Invalid JSON body' }, 400, cors); }
+  if (!body || typeof body !== 'object') return json({ error: 'Invalid request body' }, 400, cors);
+  if (body.api_version != null && body.api_version !== API_VERSION) return json({ error: 'Incompatible API version' }, 409, cors);
+  const texts = body.texts;
+  if (!Array.isArray(texts) || texts.length < 1 || texts.length > 4 ||
+      texts.some(t => typeof t !== 'string' || !t.trim() || t.length > 8000) ||
+      texts.reduce((sum, t) => sum + t.length, 0) > 24000) {
+    return json({ error: 'Send 1–4 nonempty texts, at most 8,000 characters each and 24,000 total.' }, 400, cors);
+  }
+  try {
+    const result = await env.AI.run(EMBEDDING_MODEL, { text: texts });
+    const vectors = result?.data;
+    if (!Array.isArray(vectors) || vectors.length !== texts.length || vectors.some(v =>
+      !Array.isArray(v) || !v.length || !v.every(Number.isFinite) || !v.some(x => x !== 0) || v.length !== vectors[0].length)) {
+      return json({ error: 'Embedding model returned an unexpected response. Keyword search still works.' }, 502, cors);
+    }
+    return json({ api_version: API_VERSION, model: EMBEDDING_MODEL, vectors }, 200, cors);
+  } catch {
+    return json({ error: 'Cloudflare embeddings unavailable or daily allowance reached. Keyword search still works; retry later.' }, 503, cors);
+  }
+}
 
 async function handleProcess(request, env, cors) {
   let body;

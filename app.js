@@ -87,12 +87,14 @@ const Store = {
     if (idx >= 0) { notes[idx] = note; }
     else { notes.unshift(note); }
     this.setNotes(notes);
+    Search.schedule();
   },
 
   /** Delete a note by id */
   deleteNote(id) {
     this.setNotes(this.getNotes().filter(n => n.id !== id));
     this.removePending(id);
+    Search.schedule();
   },
 
   /** Pending queue helpers */
@@ -126,7 +128,8 @@ const Store = {
   setTranscriptionPrompt(v) { localStorage.setItem(CONFIG.KEYS.TRANSCRIPTION_PROMPT, v); },
 
   /** Wipe everything */
-  clearAll() {
+  async clearAll() {
+    await Search.clear();
     Object.values(CONFIG.KEYS).forEach(k => localStorage.removeItem(k));
   },
 
@@ -717,6 +720,239 @@ function blobToBase64(blob) {
 }
 
 
+// ── SEMANTIC SEARCH ──────────────────────────────────────────────
+// Disposable IndexedDB cache. Authoritative notes remain in Store.
+const Search = {
+  MODEL: '@cf/baai/bge-m3',
+  CACHE_VERSION: 1,
+  MIN_SIMILARITY: 0.40, // Starting threshold; calibrate with real queries.
+  records: new Map(), queryCache: new Map(), queryVector: null,
+  query: '', message: '', indexing: false, rerun: false, epoch: 0,
+  cooldownUntil: 0, timer: null, queryTimer: null, controller: null, ready: null,
+
+  source(note) {
+    return [_getFinalCleanedText(note), _getFinalSummary(note),
+      ..._getFinalTags(note), ...Object.values(_getFinalFields(note))]
+      .filter(v => v != null && String(v).trim()).map(String).join('\n');
+  },
+  chunks(source) {
+    const chunks = [];
+    for (let start = 0; start < source.length;) {
+      let end = Math.min(start + 3500, source.length);
+      if (end < source.length) {
+        const space = source.lastIndexOf(' ', end);
+        if (space > start + 2000) end = space;
+        // Avoid splitting UTF-16 surrogate pairs.
+        if (/[\uD800-\uDBFF]/.test(source[end - 1])) end--;
+      }
+      chunks.push(source.slice(start, end));
+      if (end === source.length) break;
+      start = end - 150;
+    }
+    return chunks;
+  },
+  async init() {
+    if (this.ready) return this.ready;
+    this.ready = (async () => {
+      if (!window.indexedDB) throw new Error('Search storage unavailable; keyword search still works.');
+      this.db = await new Promise((resolve, reject) => {
+        const req = indexedDB.open('nc_search', 1);
+        req.onupgradeneeded = () => req.result.createObjectStore('embeddings', { keyPath: 'id' });
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(new Error('Search storage unavailable; keyword search still works.'));
+      });
+      const records = await new Promise((resolve, reject) => {
+        const req = this.db.transaction('embeddings').objectStore('embeddings').getAll();
+        req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
+      });
+      records.forEach(r => {
+        if (r.model === this.MODEL && r.version === this.CACHE_VERSION &&
+            Array.isArray(r.vectors) && r.vectors.length && r.vectors.every(v => this.validVector(v))) this.records.set(r.id, r);
+      });
+    })();
+    return this.ready;
+  },
+  validVector(v) { return Array.isArray(v) && v.length > 0 && v.every(Number.isFinite) && v.some(x => x !== 0); },
+  write(record, id) {
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction('embeddings', 'readwrite');
+      const store = tx.objectStore('embeddings');
+      if (record) store.put(record); else store.delete(id);
+      tx.oncomplete = resolve;
+      tx.onerror = tx.onabort = () => reject(new Error('Cannot save search index; keyword search still works.'));
+    });
+  },
+  async embed(texts, signal) {
+    const url = Store.getWorkerUrl();
+    if (!url) throw new Error('Set your Worker URL to enable semantic search.');
+    if (!navigator.onLine) throw new Error('Offline — showing keyword matches.');
+    const timeout = new AbortController();
+    const abort = () => timeout.abort();
+    if (signal?.aborted) timeout.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(abort, 30_000);
+    try {
+      const res = await fetch(`${url}/embeddings`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Passcode': Store.getPasscode() },
+        body: JSON.stringify({ texts, api_version: CONFIG.API_VERSION }), signal: timeout.signal,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(res.status === 404 ? 'Update worker.js to enable semantic search.' :
+        res.status === 401 ? 'Check your Worker passcode; showing keyword matches.' :
+        data.error || 'Semantic search unavailable; showing keyword matches.');
+      if (data.model !== this.MODEL || !Array.isArray(data.vectors) || data.vectors.length !== texts.length ||
+          !data.vectors.every(v => this.validVector(v)) || data.vectors.some(v => v.length !== data.vectors[0].length)) {
+        throw new Error('Unexpected embeddings response; showing keyword matches.');
+      }
+      return data.vectors;
+    } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
+  },
+  schedule(force = false) {
+    if (force) this.cooldownUntil = 0;
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.refresh(), 700);
+  },
+  notify() {
+    document.querySelectorAll('#search-status, #setting-search-status').forEach(el => { el.textContent = this.message; });
+    if (document.getElementById('screen-notes')?.classList.contains('active')) Render.renderNotesList();
+  },
+  async refresh() {
+    if (this.indexing) { this.rerun = true; return; }
+    if (!Auth.isUnlocked() || Date.now() < this.cooldownUntil) return;
+    this.indexing = true;
+    const epoch = this.epoch;
+    try {
+      await this.init();
+      const notes = Store.getNotes();
+      const ids = new Set(notes.filter(n => this.source(n).trim()).map(n => n.id));
+      for (const id of this.records.keys()) if (!ids.has(id)) {
+        await this.write(null, id); this.records.delete(id);
+      }
+      const stale = notes.filter(n => this.source(n).trim() && this.records.get(n.id)?.source !== this.source(n));
+      let done = 0;
+      // Batch up to four chunks across notes to reduce initial indexing requests.
+      const work = stale.map(note => ({ id: note.id, source: this.source(note), vectors: [] }));
+      const pending = work.flatMap(item => this.chunks(item.source).map(text => ({ item, text })));
+      for (let i = 0; i < pending.length; i += 4) {
+        if (epoch !== this.epoch) break;
+        this.message = `Updating semantic search: ${done}/${stale.length} notes. Keyword search is ready.`;
+        this.notify();
+        const batch = pending.slice(i, i + 4);
+        const vectors = await this.embed(batch.map(entry => entry.text));
+        if (epoch !== this.epoch) break;
+        batch.forEach((entry, j) => entry.item.vectors.push(vectors[j]));
+        // Only commit a note once every chunk has returned, in original order.
+        const nextItem = pending[i + 4]?.item;
+        for (const item of new Set(batch.map(entry => entry.item))) {
+          if (item === nextItem) continue;
+          const latest = Store.getNote(item.id);
+          if (!latest || this.source(latest) !== item.source) { this.rerun = true; continue; }
+          const record = { id: item.id, model: this.MODEL, version: this.CACHE_VERSION, source: item.source, vectors: item.vectors };
+          await this.write(record);
+          if (epoch !== this.epoch) break;
+          this.records.set(item.id, record);
+          done++;
+        }
+      }
+      if (epoch === this.epoch) {
+        this.message = navigator.onLine ? (this.records.size ? `Semantic search ready · ${this.records.size} notes indexed.` : 'No notes to index yet. Add a note to test semantic search.') : 'Offline — showing keyword matches.';
+      }
+    } catch (err) {
+      if (epoch === this.epoch) {
+        this.message = err.name === 'AbortError' ? 'Search indexing timed out; keyword search still works. Retry later.' : err.message;
+        this.cooldownUntil = Date.now() + 60_000;
+      } // Avoid repeated failures on every save/keystroke.
+    } finally {
+      this.indexing = false; this.notify();
+      if (this.rerun) { this.rerun = false; this.schedule(); }
+    }
+  },
+  setQuery(query) {
+    clearTimeout(this.queryTimer); this.controller?.abort();
+    this.query = query; this.queryVector = null;
+    if (!query) { this.notify(); return; }
+    this.message = 'Showing keyword matches; checking related notes…';
+    this.notify();
+    this.queryTimer = setTimeout(() => this.searchQuery(query), 450);
+  },
+  async searchQuery(query) {
+    const controller = new AbortController(); this.controller = controller;
+    const epoch = this.epoch;
+    try {
+      await this.init();
+      if (!navigator.onLine) throw new Error('Offline — showing keyword matches.');
+      if (query.length > 8000) throw new Error('Search is too long. Use a focused sentence or paragraph (up to 8,000 characters).');
+      const key = `${Store.getWorkerUrl()}\n${this.MODEL}\n${query}`;
+      // Cached query vectors are deliberately memory-only and bounded.
+      const vector = this.queryCache.get(key) || (await this.embed([query], controller.signal))[0];
+      if (controller.signal.aborted || this.query !== query || epoch !== this.epoch) return;
+      this.queryCache.set(key, vector);
+      if (this.queryCache.size > 40) this.queryCache.delete(this.queryCache.keys().next().value);
+      this.queryVector = vector;
+      this.message = this.indexing ? 'Finding related notes; index is still updating.' : 'Exact and strong keyword matches first, then related notes.';
+      this.notify(); this.schedule();
+    } catch (err) {
+      if (controller.signal.aborted || this.query !== query || epoch !== this.epoch) return;
+      this.message = err.name === 'AbortError' ? 'Semantic search timed out; showing keyword matches.' : err.message;
+      this.notify();
+    }
+  },
+  cosine(a, b) {
+    if (a.length !== b.length) return -1;
+    let dot = 0, aa = 0, bb = 0;
+    for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; aa += a[i] ** 2; bb += b[i] ** 2; }
+    return aa && bb ? dot / Math.sqrt(aa * bb) : -1;
+  },
+  normalise(text) { return String(text || '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim(); },
+  tokens(text) {
+    const stop = new Set('a an the of for to in on at and or is are was were be been it i me my we our you your about with that this these those how what where when why can could would should please find show notes note'.split(' '));
+    return [...new Set((this.normalise(text).match(/[\p{L}\p{N}]+/gu) || []).filter(t => !stop.has(t)))];
+  },
+  rank(notes, query) {
+    const q = this.normalise(query), tokens = this.tokens(q), results = [];
+    for (const note of notes) {
+      const source = this.source(note), current = this.normalise(source);
+      const historical = this.normalise([note.input?.original_text, note.input?.raw_text,
+        ...(note.context || []).map(e => e.text)].filter(Boolean).join('\n'));
+      const currentTokens = new Set(this.tokens(current)), historyTokens = new Set(this.tokens(historical));
+      const exact = text => q.includes(' ') ? text.includes(q) : new Set(text.match(/[\p{L}\p{N}]+/gu) || []).has(q);
+      const coverage = set => tokens.length ? tokens.filter(t => set.has(t)).length / tokens.length : 0;
+      const currentCoverage = coverage(currentTokens), historyCoverage = coverage(historyTokens);
+      let tier = exact(current) ? 3 : currentCoverage >= 0.8 ? 2 : 0;
+      let label = tier === 3 ? 'Exact match' : tier === 2 ? 'Keyword match' : '';
+      const oldMatch = exact(historical) || historyCoverage >= 0.8;
+      if (!tier && oldMatch) { tier = 2; label = 'Original / earlier changes match'; }
+      const record = this.records.get(note.id);
+      const similarity = this.queryVector && record?.source === source
+        ? Math.max(-1, ...record.vectors.map(v => this.cosine(this.queryVector, v))) : -1;
+      if (!tier && similarity >= this.MIN_SIMILARITY) { tier = 1; label = 'Related meaning'; }
+      const weak = Math.max(currentCoverage, historyCoverage);
+      if (!tier && weak > 0) { label = historyCoverage > currentCoverage ? 'Partial history match' : 'Partial keyword match'; }
+      if (tier || weak > 0) results.push({ note, tier, score: tier >= 2 ? currentCoverage + similarity * 0.01 : Math.max(similarity, weak * 0.3), label });
+    }
+    results.sort((a, b) => b.tier - a.tier || b.score - a.score || String(b.note.created_at).localeCompare(String(a.note.created_at)));
+    let related = 0;
+    return results.filter(r => r.tier !== 1 || related++ < 20);
+  },
+  resetConnection() {
+    this.controller?.abort(); this.queryCache.clear(); this.queryVector = null;
+    this.epoch++; if (this.indexing) this.rerun = true; this.schedule(true);
+    if (this.query) this.setQuery(this.query);
+  },
+  async clear() {
+    this.epoch++; this.controller?.abort(); clearTimeout(this.timer); clearTimeout(this.queryTimer);
+    this.records.clear(); this.queryCache.clear(); this.queryVector = null; this.query = '';
+    try {
+      await this.init();
+      await new Promise((resolve, reject) => {
+        const tx = this.db.transaction('embeddings', 'readwrite'); tx.objectStore('embeddings').clear();
+        tx.oncomplete = resolve; tx.onerror = tx.onabort = () => reject(tx.error);
+      });
+      this.records.clear();
+    } catch { /* Cache is disposable; no authoritative notes are stored here. */ }
+  },
+};
+
 // ── 6. RENDER ────────────────────────────────────────────────────
 // Builds the notes list DOM. Only touches #notes-list.
 
@@ -733,22 +969,12 @@ const Render = {
       notes = notes.filter(n => _getFinalType(n) === this.currentFilter);
     }
 
-    // Apply text search
-    if (this.currentSearch) {
-      const q = this.currentSearch.toLowerCase();
-      notes = notes.filter(n =>
-        [n.input.original_text, n.input.raw_text, ...(n.context || []).map(e => e.text), _getFinalCleanedText(n), _getFinalSummary(n),
-         ..._getFinalTags(n), ...Object.values(_getFinalFields(n))]
-          .some(v => String(v || '').toLowerCase().includes(q))
-      );
-    }
-
-    if (!notes.length) {
-      list.innerHTML = `<p class="notes-empty">no notes yet</p>`;
+    const matches = this.currentSearch ? Search.rank(notes, this.currentSearch) : notes.map(note => ({ note, label: '' }));
+    if (!matches.length) {
+      list.innerHTML = `<p class="notes-empty">${this.currentSearch ? 'No matching notes' : 'no notes yet'}</p>`;
       return;
     }
-
-    list.innerHTML = notes.map(n => _noteCardHTML(n)).join('');
+    list.innerHTML = matches.map(({ note, label }) => _noteCardHTML(note, label)).join('');
 
     // Bind tap events
     list.querySelectorAll('.note-card').forEach(card => {
@@ -758,7 +984,7 @@ const Render = {
 };
 
 /** Generate HTML string for a single note card */
-function _noteCardHTML(note) {
+function _noteCardHTML(note, matchLabel = '') {
   const type    = _getFinalType(note);
   const label   = CONFIG.TYPES.find(t => t.value === type)?.label || type;
   const topic   = _getFinalTags(note)[0] || '';
@@ -776,6 +1002,7 @@ function _noteCardHTML(note) {
       </div>
       <p class="note-summary">${escHtml(summary)}</p>
       <p class="note-time">${time}</p>
+      ${matchLabel ? `<p class="search-match-label">${escHtml(matchLabel)}</p>` : ''}
       ${note.sync.pending ? `<p class="note-pending-label">⟳ pending sync</p>` : ''}
     </div>
   `;
@@ -1299,6 +1526,7 @@ const Diagnostics = {
 const Settings = {
   load() {
     document.getElementById('setting-worker-url').value = Store.getWorkerUrl();
+    document.getElementById('setting-search-status').textContent = Search.message || 'Search index updates automatically when online.';
     this.loadPrompt();
     document.getElementById('setting-transcription-prompt').value = Store.getTranscriptionPrompt();
 
@@ -1329,13 +1557,14 @@ const Settings = {
     const p = document.getElementById('setting-passcode').value.trim();
     if (!p) { UI.showToast('Enter a passcode first', 'error'); return; }
     Store.setPasscode(p);
+    Search.resetConnection();
     document.getElementById('setting-passcode').value = '';
     UI.showToast('Passcode updated', 'ok');
   },
 
-  clearAll() {
+  async clearAll() {
     if (!confirm('Delete ALL notes and settings? This cannot be undone.')) return;
-    Store.clearAll();
+    await Store.clearAll();
     location.reload();
   },
 
@@ -1427,7 +1656,7 @@ const UI = {
     });
 
     // Side effects per screen
-    if (name === 'notes')    Render.renderNotesList();
+    if (name === 'notes') { Render.renderNotesList(); Search.schedule(); }
     if (name === 'settings') Settings.load();
   },
 };
@@ -1536,6 +1765,7 @@ function init() {
   // ── Notes list: search
   document.getElementById('search-input').addEventListener('input', e => {
     Render.currentSearch = e.target.value.trim();
+    Search.setQuery(Render.currentSearch);
     Render.renderNotesList();
   });
 
@@ -1559,6 +1789,7 @@ function init() {
   // Auto-save Worker URL when it changes — also retry pending notes
   document.getElementById('setting-worker-url').addEventListener('change', e => {
     Store.setWorkerUrl(e.target.value.trim());
+    Search.resetConnection();
     UI.showToast('Worker URL saved — retrying pending…');
     // Reset retry counts so notes stuck from earlier failures get another chance
     Store.getPending().forEach(id => {
@@ -1591,6 +1822,14 @@ function init() {
   });
 
   // ── Settings actions
+  document.getElementById('setting-search-refresh').addEventListener('click', () => {
+    Search.schedule(true);
+    if (Render.currentSearch) Search.setQuery(Render.currentSearch);
+  });
+  window.addEventListener('online', () => {
+    Search.schedule(true); if (Render.currentSearch) Search.setQuery(Render.currentSearch);
+  });
+  window.addEventListener('offline', () => { Search.controller?.abort(); Search.queryVector = null; Search.message = 'Offline — showing keyword matches.'; Search.notify(); });
   document.getElementById('setting-passcode-save').addEventListener('click', () => Settings.savePasscode());
   document.getElementById('setting-retry-all').addEventListener('click', () => {
     Queue.drainQueue(true); // true = reset retry counts so stuck notes get another chance
@@ -1616,6 +1855,7 @@ function afterUnlock() {
   UI.updatePendingBadge();
   Queue.drainQueue();
   Queue.startInterval();
+  Search.schedule();
 }
 
 // ── UTILS ────────────────────────────────────────────────────────
