@@ -2,5 +2,8 @@
   // Set this to the exact name of your EXISTING Cloudflare Worker before connecting.
   "name": "notes-capture",
   "main": "worker.js",
-  "compatibility_date": "2026-10-07"
+  "compatibility_date": "2026-10-07",
+  "ai": {
+    "binding": "AI"
+  }
 }
