@@ -1,7 +1,7 @@
 /** NoteCapture stateless Worker. Keep PASSCODE and GROQ_API_KEY in Cloudflare secrets. */
 const API_VERSION = 2;
-const WORKER_VERSION = 'semantic-search-1';
-const DEFAULT_TRANSCRIPTION_PROMPT = 'Kal subah meeting hai, please time confirm kar dein. Mujhe hotel ki maintenance check karni hai. Alhamdulillah, everything is fine. In sha Allah, I will call tomorrow.';
+const WORKER_VERSION = 'archive-backup-audio-1';
+const DEFAULT_TRANSCRIPTION_PROMPT = '';
 const DEFAULT_PROCESSING_PROMPT = `You are a personal note classification assistant.
 The input may mix English, Urdu and Arabic. The speaker does not use Hindi or Punjabi.
 Return cleaned_text, summary, clarification_question and descriptive fields in English.
@@ -59,7 +59,7 @@ export default {
     if (!env.PASSCODE || request.headers.get('X-Passcode') !== env.PASSCODE) return json({ error: 'Unauthorised' }, 401, cors);
     const path = new URL(request.url).pathname;
     try {
-      if (request.method === 'GET' && path === '/ping') return json({ status: 'ok', api_version: API_VERSION, worker_version: WORKER_VERSION, semantic_search: !!env.AI, embedding_model: EMBEDDING_MODEL }, 200, cors);
+      if (request.method === 'GET' && path === '/ping') return json({ status: 'ok', api_version: API_VERSION, worker_version: WORKER_VERSION, semantic_search: !!env.AI, embedding_model: EMBEDDING_MODEL, transcription_quality: true }, 200, cors);
       if (request.method === 'GET' && path === '/prompts') return json({ api_version: API_VERSION, processing_prompt: DEFAULT_PROCESSING_PROMPT, transcription_prompt: DEFAULT_TRANSCRIPTION_PROMPT }, 200, cors);
       if (request.method === 'GET' && path === '/diagnose') return handleDiagnose(env, cors);
       if (request.method === 'POST' && path === '/embeddings') return await handleEmbeddings(request, env, cors);
@@ -105,16 +105,19 @@ async function handleProcess(request, env, cors) {
   try { body = await request.json(); } catch { return json({ error: 'Invalid JSON body' }, 400, cors); }
   if (body.api_version != null && body.api_version !== API_VERSION) return json({ error: 'Incompatible API version. Update frontend and Worker together.' }, 409, cors);
   let transcript = typeof body.raw_text === 'string' ? body.raw_text : '';
+  let transcription = null;
   if (body.audio_base64) {
-    const result = await transcribeAudio(body.audio_base64, env, body.transcription_prompt, body.audio_mime_type);
+    const result = await transcribeAudio(body.audio_base64, env, body.transcription_prompt, body.audio_mime_type, body.transcription_language);
     if (!result.ok) return json({ status: 'transcription_failed', note_id: body.note_id, error: result.error }, 200, cors);
     transcript = result.text;
+    transcription = result.quality;
+    if (transcription.level !== 'high') return json({ status: 'transcription_review', note_id: body.note_id, transcript, transcription, error: transcription.reasons.join(' ') }, 200, cors);
   }
   if (!transcript.trim()) return json({ status: 'empty_input', note_id: body.note_id }, 200, cors);
   const prompt = buildPrompt(transcript, body);
   const result = await callGroq(prompt, env.GROQ_API_KEY);
-  if (!result.ok) return json({ status: 'ai_failed', note_id: body.note_id, transcript, error: result.error }, 200, cors);
-  return json({ status: 'ok', api_version: API_VERSION, note_id: body.note_id, result: { ...result.data, transcript } }, 200, cors);
+  if (!result.ok) return json({ status: 'ai_failed', note_id: body.note_id, transcript, transcription, error: result.error }, 200, cors);
+  return json({ status: 'ok', api_version: API_VERSION, note_id: body.note_id, transcription, result: { ...result.data, transcript } }, 200, cors);
 }
 
 function buildPrompt(source, body = {}) {
@@ -135,7 +138,7 @@ function buildPrompt(source, body = {}) {
 }
 
 /** Retry from audio, never transliterate a guessed Hindi transcript into an "original". */
-async function transcribeAudio(base64, env, guidance, mimeType = 'audio/webm') {
+async function transcribeAudio(base64, env, guidance, mimeType = 'audio/webm', language = 'auto') {
   if (!env.GROQ_API_KEY) return { ok: false, error: 'GROQ_API_KEY not configured' };
   try {
     const binary = atob(base64);
@@ -148,21 +151,40 @@ async function transcribeAudio(base64, env, guidance, mimeType = 'audio/webm') {
       const form = new FormData();
       form.append('file', new Blob([bytes], { type: mime }), `audio.${ext}`);
       form.append('model', 'whisper-large-v3');
-      form.append('response_format', 'json');
+      form.append('response_format', 'verbose_json');
       form.append('temperature', '0');
       if (prompt) form.append('prompt', prompt);
       // Only retry with Urdu when the first auto-detected transcript used Devanagari.
       if (attempt === 1) form.append('language', 'ur');
+      else if (['ur', 'en', 'ar'].includes(language)) form.append('language', language);
       const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
         method: 'POST', headers: { Authorization: `Bearer ${env.GROQ_API_KEY}` }, body: form,
       });
       if (!res.ok) return { ok: false, error: `Groq Whisper ${res.status}: ${await res.text()}` };
       const data = await res.json();
       const text = typeof data.text === 'string' ? data.text : '';
-      if (!/[\u0900-\u097f\ua8e0-\ua8ff]/u.test(text)) return { ok: true, text };
+      if (!/[\u0900-\u097f\ua8e0-\ua8ff]/u.test(text)) return { ok: true, text, quality: assessTranscription(data) };
     }
     return { ok: false, error: 'Transcription still contains Hindi script after retry. Audio retained; retry or transcribe manually.' };
   } catch (err) { return { ok: false, error: err.message }; }
+}
+
+/** Conservative heuristics, not calibrated accuracy percentages. Check every segment. */
+function assessTranscription(data) {
+  const reasons = [];
+  const segments = Array.isArray(data.segments) ? data.segments : [];
+  if (!data.text?.trim()) reasons.push('No speech was transcribed.');
+  if (!segments.length || segments.some(s => !Number.isFinite(s.avg_logprob) ||
+      !Number.isFinite(s.no_speech_prob) || !Number.isFinite(s.compression_ratio))) {
+    reasons.push('Transcription quality information is unavailable.');
+  }
+  if (segments.some(s => s.avg_logprob < -0.5)) reasons.push('Some words may be uncertain.');
+  if (segments.some(s => s.no_speech_prob > 0.6)) reasons.push('Possible silence or background noise.');
+  if (segments.some(s => s.compression_ratio > 2.4)) reasons.push('Possible repeated or invented text.');
+  return { level: reasons.length ? 'review' : 'high', reasons, policy_version: 1,
+    language: data.language || null,
+    segments: segments.map(s => ({ start: s.start, end: s.end, avg_logprob: s.avg_logprob,
+      no_speech_prob: s.no_speech_prob, compression_ratio: s.compression_ratio })) };
 }
 
 async function callGroq(prompt, apiKey) {

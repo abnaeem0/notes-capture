@@ -28,11 +28,12 @@ const CONFIG = {
     CAPTURE_TYPE:'nc_capture_type', // last chosen capture type override
     TRANSCRIPTION_PROMPT: 'nc_transcription_prompt',
     PROMPT:      'nc_custom_prompt',// custom AI prompt override (empty = Worker default)
+    INCLUDE_ARCHIVED: 'nc_include_archived',
     DATA_VERSION:'nc_data_version', // note schema migration version
   },
 
   API_VERSION: 2,
-  DEFAULT_TRANSCRIPTION_PROMPT: 'Kal subah meeting hai, please time confirm kar dein. Mujhe hotel ki maintenance check karni hai. Alhamdulillah, everything is fine. In sha Allah, I will call tomorrow.',
+  DEFAULT_TRANSCRIPTION_PROMPT: '',
 
   // How often the retry queue runs (ms)
   QUEUE_INTERVAL_MS: 60_000,
@@ -92,7 +93,9 @@ const Store = {
 
   /** Delete a note by id */
   deleteNote(id) {
+    const audioKey = this.getNote(id)?.input?.audio_blob_key;
     this.setNotes(this.getNotes().filter(n => n.id !== id));
+    if (audioKey) AudioStore.remove(audioKey).catch(() => {});
     this.removePending(id);
     Search.schedule();
   },
@@ -129,6 +132,7 @@ const Store = {
 
   /** Wipe everything */
   async clearAll() {
+    await AudioStore.clear();
     await Search.clear();
     Object.values(CONFIG.KEYS).forEach(k => localStorage.removeItem(k));
   },
@@ -177,6 +181,220 @@ const Store = {
       this.setNotes(notes);
       localStorage.setItem(CONFIG.KEYS.DATA_VERSION, '2');
     }
+    if (currentVersion < 3) {
+      this.setNotes(this.getNotes().map(normalizeNote));
+      // Remove only the shipped example prompt; preserve genuine custom guidance.
+      const old = 'Kal subah meeting hai, please time confirm kar dein. Mujhe hotel ki maintenance check karni hai. Alhamdulillah, everything is fine. In sha Allah, I will call tomorrow.';
+      if (localStorage.getItem(CONFIG.KEYS.TRANSCRIPTION_PROMPT) === old) this.setTranscriptionPrompt('');
+      localStorage.setItem(CONFIG.KEYS.DATA_VERSION, '3');
+    }
+
+  },
+};
+
+
+// Lifecycle belongs to the user and is independent of AI processing status.
+function normalizeNote(note) {
+  note.input = note.input || {};
+  note.ai = note.ai || {};
+  note.user = note.user || {};
+  note.sync = note.sync || { pending: false, retry_count: 0, last_error: null };
+  note.sync.retry_count = Number.isFinite(note.sync.retry_count) ? note.sync.retry_count : 0;
+  note.context = Array.isArray(note.context) ? note.context : [];
+  if (!Array.isArray(note.ai.topics)) note.ai.topics = note.ai.topic ? [note.ai.topic] : [];
+  if (!Array.isArray(note.user.tags_added)) note.user.tags_added = [];
+  if (!Array.isArray(note.user.tags_removed)) note.user.tags_removed = [];
+  if (note.user.topic_override && note.user.topic_override !== note.ai.topic) {
+    if (!note.user.tags_added.includes(note.user.topic_override)) note.user.tags_added.push(note.user.topic_override);
+    if (note.ai.topic && !note.user.tags_removed.includes(note.ai.topic)) note.user.tags_removed.push(note.ai.topic);
+  }
+  if (note.ai.clarification_dismissed) note.user.dismissed_question_id ??= note.ai.clarification_question;
+  note.user.archived_at ??= null;
+  note.user.completed_at ??= null;
+  return note;
+}
+
+function visibleNotes(notes, view, query, includeArchived) {
+  return notes.filter(n => view === 'archived' ? !!n.user?.archived_at :
+    view === 'all' || (!!query && includeArchived) || !n.user?.archived_at);
+}
+
+const AudioStore = {
+  dbPromise: null,
+  open() {
+    if (!this.dbPromise) this.dbPromise = new Promise((resolve, reject) => {
+      const request = indexedDB.open('nc_audio_store', 1);
+      request.onupgradeneeded = () => request.result.createObjectStore('audio');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+      request.onblocked = () => reject(new Error('Close other NoteCapture tabs and retry.'));
+    }).catch(err => { this.dbPromise = null; throw err; });
+    return this.dbPromise;
+  },
+  async transaction(mode, action) {
+    const db = await this.open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('audio', mode);
+      let result;
+      const request = action(tx.objectStore('audio'));
+      request.onsuccess = () => { result = request.result; };
+      tx.oncomplete = () => resolve(result);
+      tx.onerror = () => reject(tx.error || new Error('Audio storage failed.'));
+      tx.onabort = () => reject(tx.error || new Error('Audio storage aborted.'));
+    });
+  },
+  async get(key, mime = 'audio/webm') {
+    if (!key) return null;
+    // Read old recordings even if migration could not complete.
+    const legacy = key.startsWith('nc_audio_') ? localStorage.getItem(key) : null;
+    if (legacy) return base64Blob(legacy, mime || (legacy.startsWith('AAAA') ? 'audio/mp4' : 'audio/webm'));
+    return (await this.transaction('readonly', s => s.get(key))) || null;
+  },
+  put(key, blob) { return this.transaction('readwrite', s => s.put(blob, key)); },
+  async remove(key) {
+    if (!key) return;
+    await this.transaction('readwrite', s => s.delete(key));
+    if (key.startsWith('nc_audio_')) localStorage.removeItem(key);
+  },
+  async clear() {
+    await this.transaction('readwrite', s => s.clear());
+    Object.keys(localStorage).filter(k => k.startsWith('nc_audio_')).forEach(k => localStorage.removeItem(k));
+  },
+  async migrateLegacy() {
+    for (const note of Store.getNotes()) {
+      const key = note.input?.audio_blob_key;
+      if (!key?.startsWith('nc_audio_')) continue;
+      const value = localStorage.getItem(key);
+      if (!value) continue;
+      await this.put(key, base64Blob(value, note.input.audio_mime_type || (value.startsWith('AAAA') ? 'audio/mp4' : 'audio/webm')));
+      localStorage.removeItem(key); // only after committed IndexedDB write
+    }
+  },
+};
+
+function base64Blob(base64, mime) {
+  const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+  return new Blob([bytes], { type: mime || 'audio/webm' });
+}
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+function validateBackup(data) {
+  if (!data || !Array.isArray(data.notes) || !Number.isInteger(data.schema_version) || data.schema_version < 1 || data.schema_version > 3)
+    throw new Error('Unsupported backup. Choose a NoteCapture JSON backup (schema 1–3).');
+  if (data.format && data.format !== 'notecapture-backup') throw new Error('This is not a NoteCapture backup.');
+  if (data.audio != null && (!Array.isArray(data.audio))) throw new Error('Invalid audio list.');
+  const ids = new Set();
+  const record = v => v && typeof v === 'object' && !Array.isArray(v);
+  for (const n of data.notes) {
+    if (!record(n) || typeof n.id !== 'string' || !n.id || ids.has(n.id) ||
+        !record(n.input) || (n.ai != null && !record(n.ai)) || (n.user != null && !record(n.user)) ||
+        (n.sync != null && !record(n.sync)) || (n.context != null && !Array.isArray(n.context))) throw new Error('Backup contains an invalid or duplicate note.');
+    ids.add(n.id);
+    for (const group of [n.input, n.ai || {}, n.user || {}]) {
+      for (const k of ['raw_text', 'original_text', 'processing_text', 'cleaned_text', 'summary', 'type', 'type_override', 'topic', 'topic_override', 'audio_blob_key'])
+        if (group[k] != null && typeof group[k] !== 'string') throw new Error(`Invalid ${k} in backup.`);
+      for (const k of ['topics', 'tags_added', 'tags_removed'])
+        if (group[k] != null && (!Array.isArray(group[k]) || group[k].some(v => typeof v !== 'string'))) throw new Error('Invalid tags in backup.');
+      if (group.fields != null && (!record(group.fields) || Object.values(group.fields).some(v => v != null && !['string', 'number', 'boolean'].includes(typeof v)))) throw new Error('Invalid fields in backup.');
+    }
+    if ((n.context || []).some(e => !record(e) || typeof e.text !== 'string')) throw new Error('Invalid history in backup.');
+    if (n.input.audio_blob_key && !n.input.audio_blob_key.startsWith('nc_audio_')) throw new Error('Invalid recording key.');
+    if (n.ai?.type && !CONFIG.TYPES.some(t => t.value === n.ai.type)) throw new Error('Unknown note type.');
+    if (n.user?.type_override && !CONFIG.TYPES.some(t => t.value === n.user.type_override)) throw new Error('Unknown note type override.');
+  }
+  const audios = new Set();
+  for (const a of data.audio || []) {
+    if (!record(a) || !ids.has(a.note_id) || audios.has(a.note_id) || typeof a.base64 !== 'string' ||
+        !a.base64 || a.base64.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(a.base64) ||
+        typeof a.mime_type !== 'string' || !/^audio\/[a-z0-9.+-]+(?:;.*)?$/i.test(a.mime_type)) throw new Error('Backup contains invalid audio.');
+    audios.add(a.note_id);
+  }
+  return data.notes.map(normalizeNote);
+}
+
+const Backup = {
+  busy: false,
+  lock() {
+    if (this.busy || Queue.active.size || Capture.saving || Capture.mediaRecorder?.state === 'recording') throw new Error('Wait for recording or processing to finish, then try again.');
+    this.busy = true;
+    document.querySelectorAll('.screen').forEach(el => { el.inert = true; });
+  },
+  unlock() { this.busy = false; document.querySelectorAll('.screen').forEach(el => { el.inert = false; }); },
+  status(text) { document.getElementById('backup-status').textContent = text; },
+  async export() {
+    if (this.busy) return;
+    try {
+      this.lock(); this.status('Preparing backup…');
+      const notes = Store.getNotes(), audio = [];
+      for (const n of notes) {
+        if (!n.input.audio_blob_key) continue;
+        const blob = await AudioStore.get(n.input.audio_blob_key, n.input.audio_mime_type);
+        if (!blob) throw new Error('A recording is missing. Restore it or remove its recording link before making a full backup.');
+        audio.push({ note_id: n.id, mime_type: blob.type || 'audio/webm', base64: await blobToBase64(blob) });
+      }
+      const data = { format: 'notecapture-backup', schema_version: 3, exported_at: new Date().toISOString(), notes, audio };
+      downloadBlob(new Blob([JSON.stringify(data)], { type: 'application/json' }), `notecapture-backup-${new Date().toISOString().slice(0, 10)}.json`);
+      this.status(`Backup download started: ${notes.length} notes and ${audio.length} recordings. Keep the downloaded file safe.`);
+    } catch (err) { this.status(`Export failed: ${err.message}`); }
+    finally { this.unlock(); }
+  },
+  async import(file) {
+    if (!file || this.busy) return;
+    const staged = [];
+    let committed = false;
+    try {
+      this.lock(); this.status('Checking backup…');
+      const data = JSON.parse(await file.text());
+      const incoming = validateBackup(data);
+      const before = localStorage.getItem(CONFIG.KEYS.NOTES);
+      const current = Store.getNotes();
+      const map = new Map(current.map(n => [n.id, n]));
+      const audio = new Map((data.audio || []).map(a => [a.note_id, a]));
+      let added = 0, updated = 0, kept = 0, missing = 0;
+      const timestamp = n => { const t = Date.parse(n.updated_at); return Number.isFinite(t) ? t : 0; };
+      for (const n of incoming) {
+        const existing = map.get(n.id);
+        if (existing && timestamp(n) <= timestamp(existing)) { kept++; continue; }
+        if (n.input.audio_blob_key) {
+          const a = audio.get(n.id);
+          if (a) {
+            const key = `nc_audio_import_${crypto.randomUUID()}`;
+            staged.push(key);
+            await AudioStore.put(key, base64Blob(a.base64, a.mime_type));
+            n.input.audio_blob_key = key;
+            n.input.audio_mime_type = a.mime_type.split(';')[0];
+          } else {
+            // Preserve an existing device recording when restoring a text-only backup.
+            const oldBlob = existing?.input?.audio_blob_key ? await AudioStore.get(existing.input.audio_blob_key, existing.input.audio_mime_type) : null;
+            n.input.audio_blob_key = oldBlob ? existing.input.audio_blob_key : null;
+            if (!oldBlob) { missing++; n.sync.pending = false; n.status = 'error'; n.sync.last_error = 'This backup did not include the recording. Enter text manually or restore a full backup.'; }
+          }
+        }
+        if (n.status === 'processing') n.status = 'raw';
+        if (n.status === 'transcription_review') n.sync.pending = false;
+        map.set(n.id, n);
+        if (existing) updated++; else added++;
+      }
+      if (localStorage.getItem(CONFIG.KEYS.NOTES) !== before) throw new Error('Notes changed in another tab. Retry import.');
+      const merged = [...map.values()].sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));
+      Store.setNotes(merged); // one atomic localStorage write, after audio is durable
+      committed = true;
+      localStorage.setItem(CONFIG.KEYS.DATA_VERSION, '3');
+      localStorage.setItem(CONFIG.KEYS.PENDING, JSON.stringify(merged.filter(n => n.sync.pending && n.status !== 'transcription_review').map(n => n.id)));
+      // Only delete old recordings after the merged notes commit.
+      const keys = new Set(merged.map(n => n.input.audio_blob_key).filter(Boolean));
+      for (const n of current) if (n.input.audio_blob_key && !keys.has(n.input.audio_blob_key)) await AudioStore.remove(n.input.audio_blob_key).catch(() => {});
+      Search.schedule(); Render.renderNotesList(); UI.updatePendingBadge();
+      this.status(`Imported: ${added} added, ${updated} updated, ${kept} existing copies kept.${missing ? ` ${missing} recording(s) were absent from this backup.` : ''}`);
+    } catch (err) {
+      if (!committed) for (const key of staged) await AudioStore.remove(key).catch(() => {});
+      this.status(`${committed ? 'Notes imported, but queue refresh failed; reload the app' : 'Import failed; existing notes were kept'}: ${err.message}`);
+    } finally { this.unlock(); }
   },
 };
 
@@ -224,6 +442,7 @@ const Capture = {
   mediaRecorder: null,
   audioChunks: [],
   recordTimer: null,
+  saving: false,
   captureTypeOverride: null, // null = let AI decide
 
   /** Build a fresh empty note object */
@@ -282,13 +501,6 @@ const Capture = {
       UI.setMicStatus('voice not available — use text');
       return;
     }
-    // Block recording when offline — audio requires Groq Whisper (server-side)
-    // If offline, user should type instead. Audio blobs cannot be transcribed locally.
-    if (!navigator.onLine) {
-      UI.showToast('Offline — type your note instead', 'error');
-      UI.setMicStatus('offline — use text input');
-      return;
-    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       this.audioChunks = [];
@@ -334,30 +546,34 @@ const Capture = {
 
   /** Called when MediaRecorder finishes — save audio + enqueue */
   async _onRecordingDone() {
+    this.saving = true;
     const blob = new Blob(this.audioChunks, { type: this.mediaRecorder.mimeType || 'audio/webm' });
     this.audioChunks = [];
 
     const note = this.makeNote('voice');
 
-    // Save audio blob to localStorage as base64
-    // (blobs can't be serialised directly)
     const blobKey = `nc_audio_${note.id}`;
     try {
-      const base64 = await blobToBase64(blob);
-      localStorage.setItem(blobKey, base64);
+      if (!blob.size) throw new Error('The recording is empty.');
+      await AudioStore.put(blobKey, blob);
       note.input.audio_blob_key = blobKey;
       note.input.audio_mime_type = blob.type.split(';')[0];
+      Store.saveNote(note);
+      Store.addPending(note.id);
     } catch (err) {
-      console.warn('Capture: could not save audio blob', err);
+      this.saving = false;
+      // Keep a downloadable copy in memory if browser storage fails.
+      downloadBlob(blob, `unsaved-recording-${Date.now()}.${blob.type.includes('mp4') ? 'm4a' : blob.type.includes('ogg') ? 'ogg' : 'webm'}`);
+      UI.setMicState('idle');
+      UI.setMicStatus('recording could not be saved');
+      UI.showToast('Storage failed. A recording download was offered; check it before leaving.', 'error');
+      return;
     }
-
-    // Save note immediately — this is the never-lose-it guarantee
-    Store.saveNote(note);
-    Store.addPending(note.id);
 
     UI.setMicState('idle');
     UI.setMicStatus('tap to record');
-    UI.showToast('Note saved — processing…');
+    this.saving = false;
+    UI.showToast(navigator.onLine ? 'Note saved — processing…' : 'Note saved — queued offline');
     UI.updatePendingBadge();
 
     // Try to process now
@@ -397,7 +613,7 @@ const Queue = {
   /** Process a single note by id */
   async processNote(id) {
     const note = Store.getNote(id);
-    if (!note || this.active.has(id) || navigator.onLine === false) return;
+    if (!note || this.active.has(id) || Backup.busy || navigator.onLine === false || note.status === 'transcription_review') return;
 
     const workerUrl = Store.getWorkerUrl();
     const passcode  = Store.getPasscode();
@@ -421,6 +637,7 @@ const Queue = {
       const ping = await fetch(`${workerUrl}/ping`, { headers: { 'X-Passcode': passcode } });
       if (!ping.ok) throw new Error(`Worker authentication/connectivity failed: HTTP ${ping.status}`);
       const protocol = await ping.json();
+      if (note.input.audio_blob_key && (!note.input.original_text || note.input.retry_audio) && !note.input.reprocess_requested && !protocol.transcription_quality) throw new Error('Deploy the updated Worker before transcribing audio.');
       if (protocol.api_version !== CONFIG.API_VERSION) throw new Error('Deploy the updated Worker (API 2) before processing notes.');
       // Build request body
       const body = {
@@ -428,6 +645,7 @@ const Queue = {
         mode: note.input.mode,
         api_version: CONFIG.API_VERSION,
         transcription_prompt: Store.getTranscriptionPrompt(),
+        transcription_language: note.input.transcription_language || 'auto',
         created_at: note.created_at,
         current_time: new Date().toISOString(),
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
@@ -439,8 +657,10 @@ const Queue = {
       };
 
       // Attach audio if present
-      if (note.input.audio_blob_key && !note.input.reprocess_requested) {
-        const base64 = localStorage.getItem(note.input.audio_blob_key);
+      if (note.input.audio_blob_key && (!note.input.original_text || note.input.retry_audio) && !note.input.reprocess_requested) {
+        const audio = await AudioStore.get(note.input.audio_blob_key, note.input.audio_mime_type);
+        const base64 = audio ? await blobToBase64(audio) : null;
+        if (!base64) throw new Error('Saved recording is missing. Restore a backup or enter the text manually.');
         if (base64) {
           body.audio_base64 = base64;
           body.audio_mime_type = note.input.audio_mime_type || (base64.startsWith('AAAA') ? 'audio/mp4' : 'audio/webm');
@@ -456,6 +676,7 @@ const Queue = {
         body: JSON.stringify(body),
       });
 
+      if (!Store.getNote(id)) return;
       if (res.status === 401) {
         UI.showToast('Passcode rejected by Worker', 'error');
         note.status = 'raw';
@@ -468,15 +689,34 @@ const Queue = {
       const stored = Store.getNote(id);
       if (!stored) return;
       note.user = stored.user; // preserve edits saved while the request was in flight
-      // Persist a successful transcript even if subsequent structuring fails.
-      const transcript = data.result?.transcript || data.transcript;
-      if (transcript && !note.input.original_text && !note.input.reprocess_requested) {
+      // Keep user's archive/completion changes made during this request.
+      const transcript = data.result?.transcript ?? data.transcript;
+      if (body.audio_base64 && typeof transcript === 'string') {
         note.input.raw_text = transcript;
-        note.input.original_text = transcript;
-        const audioKey = note.input.audio_blob_key;
-        note.input.audio_blob_key = null;
+        if (!note.input.original_text && transcript) note.input.original_text = transcript;
+        note.input.transcription_quality = data.transcription || { level: 'review', reasons: ['Quality information unavailable.'] };
+        note.input.retry_audio = false;
+        note.context.push({ id: crypto.randomUUID(), at: new Date().toISOString(), source: 'transcription', text: transcript });
+        // A retry uses the new transcript for future text-only processing.
+        if (stored.input.original_text) note.input.processing_text = transcript;
         Store.saveNote(note);
-        if (audioKey) localStorage.removeItem(audioKey);
+        if (data.transcription?.level === 'high' && transcript.trim()) {
+          await AudioStore.remove(note.input.audio_blob_key);
+          const latest = Store.getNote(id);
+          if (!latest) return;
+          note.user = latest.user;
+          note.input.audio_blob_key = null;
+          Store.saveNote(note);
+        }
+      }
+      if (data.status === 'transcription_review') {
+        note.status = 'transcription_review';
+        note.sync.pending = false;
+        note.sync.last_error = data.error || 'Listen to the recording and check the transcript.';
+        Store.saveNote(note);
+        Store.removePending(id);
+        UI.showToast('Recording saved — check the uncertain transcript.');
+        return;
       }
 
       if (data.status === 'ok' && data.result) {
@@ -489,11 +729,6 @@ const Queue = {
         note.sync.pending = false;
         note.sync.last_error = null;
 
-        // Clean up stored audio blob once transcribed
-        if (note.input.audio_blob_key && body.audio_base64) {
-          localStorage.removeItem(note.input.audio_blob_key);
-          note.input.audio_blob_key = null;
-        }
         Store.saveNote(note);
         Store.removePending(note.id);
         UI.updatePendingBadge();
@@ -526,7 +761,7 @@ const Queue = {
     const pending = Store.getPending();
     if (!pending.length) return;
     // Process up to 3 at a time to avoid hammering quota
-    const batch = pending.slice(0, 3);
+    const batch = pending.filter(id => { const n = Store.getNote(id); return n && n.status !== 'transcription_review' && (resetRetries || n.sync.retry_count < CONFIG.MAX_RETRIES); }).slice(0, 3);
     for (const id of batch) {
       // If manual retry, reset retry count so stuck notes get another chance
       if (resetRetries) {
@@ -959,10 +1194,13 @@ const Search = {
 const Render = {
   currentFilter: 'all',
   currentSearch: '',
+  archiveView: 'active',
 
   renderNotesList() {
     const list = document.getElementById('notes-list');
     let notes = Store.getNotes();
+
+    notes = visibleNotes(notes, this.archiveView, this.currentSearch, localStorage.getItem(CONFIG.KEYS.INCLUDE_ARCHIVED) !== 'false');
 
     // Apply type filter
     if (this.currentFilter !== 'all') {
@@ -995,13 +1233,16 @@ function _noteCardHTML(note, matchLabel = '') {
   const isPending = note.sync.pending ? 'pending' : '';
 
   return `
-    <div class="note-card ${needsCtx} ${isPending}" data-id="${note.id}" data-type="${type}">
+    <div class="note-card ${needsCtx} ${isPending}" data-id="${escHtml(note.id)}" data-type="${escHtml(type)}">
       <div class="note-card-top">
-        <span class="note-type-badge ${type}">${label}</span>
+        <span class="note-type-badge ${type}">${escHtml(label)}</span>
         ${topic ? `<span class="note-topic">${escHtml(topic)}</span>` : ''}
       </div>
       <p class="note-summary">${escHtml(summary)}</p>
       <p class="note-time">${time}</p>
+      ${note.user?.archived_at ? '<p class="search-match-label">Archived</p>' : ''}
+      ${note.user?.completed_at ? '<p class="search-match-label">Completed</p>' : ''}
+      ${note.status === 'transcription_review' ? '<p class="note-pending-label">Check transcript · audio retained</p>' : ''}
       ${matchLabel ? `<p class="search-match-label">${escHtml(matchLabel)}</p>` : ''}
       ${note.sync.pending ? `<p class="note-pending-label">⟳ pending sync</p>` : ''}
     </div>
@@ -1048,16 +1289,21 @@ const Modal = {
     document.getElementById('modal-timestamps').textContent =
       `created ${_relativeTime(note.created_at)}  ·  updated ${_relativeTime(note.updated_at)}`;
 
+    document.getElementById('modal-archive').textContent = note.user.archived_at ? 'Restore to active' : 'Archive';
+    const complete = document.getElementById('modal-complete');
+    complete.classList.toggle('hidden', !['todo', 'reminder', 'schedule'].includes(type) && !note.user.completed_at);
+    complete.textContent = note.user.completed_at ? 'Mark not done' : 'Done & archive';
+    document.getElementById('modal-audio-status').textContent = note.input.transcription_quality?.reasons?.join(' ') || '';
+    document.getElementById('modal-audio-transcript').textContent = note.input.raw_text || '(No words detected)';
+    document.getElementById('modal-audio-language').value = note.input.transcription_language || 'auto';
+    AudioPlayer.hide();
     if (note.input.audio_blob_key) {
-      const base64 = localStorage.getItem(note.input.audio_blob_key);
-      if (base64) {
-        const isMp4 = base64.startsWith('/w') || base64.startsWith('AAAA');
-        AudioPlayer.load(base64, isMp4 ? 'audio/mp4' : 'audio/webm');
-      } else {
-        AudioPlayer.hide();
-      }
-    } else {
-      AudioPlayer.hide();
+      AudioStore.get(note.input.audio_blob_key, note.input.audio_mime_type).then(async blob => {
+        const base64 = blob ? await blobToBase64(blob) : null;
+        if (this.currentId !== id) return;
+        if (base64) AudioPlayer.load(base64, blob.type || note.input.audio_mime_type || 'audio/webm');
+        else UI.showToast('Saved recording is missing.', 'error');
+      }).catch(err => UI.showToast(`Could not load recording: ${err.message}`, 'error'));
     }
 
     document.getElementById('modal-note').classList.remove('hidden');
@@ -1136,6 +1382,41 @@ const Modal = {
       Render.renderNotesList();
       UI.showToast('Saved', 'ok');
     }
+  },
+
+  lifecycle(action) {
+    if (this.hasUnsavedChanges()) { UI.showToast('Save your text changes first.'); return; }
+    const note = Store.getNote(this.currentId);
+    if (!note) return;
+    const now = new Date().toISOString();
+    if (action === 'archive') note.user.archived_at = note.user.archived_at ? null : now;
+    else if (note.user.completed_at) note.user.completed_at = null;
+    else { note.user.completed_at = now; note.user.archived_at = now; }
+    Store.saveNote(note);
+    this.close(); Render.renderNotesList();
+  },
+
+  retryAudio() {
+    const note = Store.getNote(this.currentId);
+    if (!note || !note.input.audio_blob_key || Queue.active.has(note.id)) return;
+    if (this.hasUnsavedChanges()) { UI.showToast('Save your text changes first.'); return; }
+    note.input.retry_audio = true;
+    note.input.reprocess_requested = false;
+    note.input.transcription_language = document.getElementById('modal-audio-language').value;
+    note.status = 'raw'; note.sync.pending = true; note.sync.retry_count = 0;
+    Store.saveNote(note); Store.addPending(note.id);
+    this.close(); Queue.processNote(note.id);
+  },
+
+  async removeAudio() {
+    const note = Store.getNote(this.currentId);
+    if (!note || Queue.active.has(note.id)) return;
+    if (!confirm('Delete this recording? Keep it if you still need to check the transcript.')) return;
+    try {
+      await AudioStore.remove(note.input.audio_blob_key);
+      note.input.audio_blob_key = null;
+      Store.saveNote(note); AudioPlayer.hide();
+    } catch (err) { UI.showToast(err.message, 'error'); }
   },
 
   delete() {
@@ -1525,6 +1806,11 @@ const Diagnostics = {
 
 const Settings = {
   load() {
+    const pass = document.getElementById('setting-passcode');
+    pass.value = Store.getPasscode();
+    pass.type = 'password';
+    const eye = pass.parentElement.querySelector('.password-eye');
+    eye.setAttribute('aria-pressed', 'false'); eye.setAttribute('aria-label', 'Show passcode'); eye.title = 'Show passcode';
     document.getElementById('setting-worker-url').value = Store.getWorkerUrl();
     document.getElementById('setting-search-status').textContent = Search.message || 'Search index updates automatically when online.';
     this.loadPrompt();
@@ -1558,7 +1844,10 @@ const Settings = {
     if (!p) { UI.showToast('Enter a passcode first', 'error'); return; }
     Store.setPasscode(p);
     Search.resetConnection();
-    document.getElementById('setting-passcode').value = '';
+    document.getElementById('setting-passcode').value = Store.getPasscode();
+    document.getElementById('setting-passcode').type = 'password';
+    const eye = document.querySelector('#setting-passcode + .password-eye');
+    eye.setAttribute('aria-pressed', 'false'); eye.setAttribute('aria-label', 'Show passcode'); eye.title = 'Show passcode';
     UI.showToast('Passcode updated', 'ok');
   },
 
@@ -1580,7 +1869,7 @@ const Settings = {
       if (!res.ok) throw new Error(res.status === 404 ? 'Deploy the updated Worker to enable prompt viewing.' : `Worker returned HTTP ${res.status}`);
       const data = await res.json();
       document.getElementById('default-processing-prompt').textContent = data.processing_prompt;
-      document.getElementById('default-transcription-prompt').textContent = data.transcription_prompt;
+      document.getElementById('default-transcription-prompt').textContent = data.transcription_prompt || '(Blank — no guidance sent)';
       status.textContent = `Deployed Worker defaults · API ${data.api_version}`;
     } catch (err) { status.textContent = err.message; }
   },
@@ -1655,6 +1944,8 @@ const UI = {
       btn.classList.toggle('active', btn.dataset.screen === name);
     });
 
+    if (name !== 'settings') document.getElementById('setting-passcode').type = 'password';
+
     // Side effects per screen
     if (name === 'notes') { Render.renderNotesList(); Search.schedule(); }
     if (name === 'settings') Settings.load();
@@ -1667,6 +1958,9 @@ const UI = {
 
 function init() {
   Store.migrateNotes();
+  // Rebuild the disposable queue after imports or an interrupted queue write.
+  localStorage.setItem(CONFIG.KEYS.PENDING, JSON.stringify(Store.getNotes().filter(n => n.sync?.pending && n.status !== 'transcription_review').map(n => n.id)));
+  AudioStore.migrateLegacy().catch(() => UI.showToast('Old recordings are still available; audio migration will retry next time.', 'error'));
 
   // ── Passcode gate
   if (Auth.isUnlocked()) {
@@ -1702,12 +1996,12 @@ function init() {
     UI.setMicState('no-voice');
     UI.setMicStatus('voice not supported — use text');
   } else if (!navigator.onLine) {
-    UI.setMicStatus('offline — use text input');
+    UI.setMicStatus('offline — recording will queue');
   }
 
   // Update mic label whenever online/offline state changes
   window.addEventListener('online',  () => UI.setMicStatus('tap to record'));
-  window.addEventListener('offline', () => UI.setMicStatus('offline — use text input'));
+  window.addEventListener('offline', () => UI.setMicStatus('offline — recording will queue'));
 
   micBtn.addEventListener('click', () => {
     if (!Capture.hasVoiceSupport()) return;
@@ -1768,6 +2062,19 @@ function init() {
     Search.setQuery(Render.currentSearch);
     Render.renderNotesList();
   });
+
+  const archived = document.getElementById('search-include-archived');
+  archived.checked = localStorage.getItem(CONFIG.KEYS.INCLUDE_ARCHIVED) !== 'false';
+  archived.addEventListener('change', () => {
+    localStorage.setItem(CONFIG.KEYS.INCLUDE_ARCHIVED, String(archived.checked)); Render.renderNotesList();
+  });
+  document.getElementById('archive-view').addEventListener('change', e => { Render.archiveView = e.target.value; Render.renderNotesList(); });
+  document.getElementById('modal-archive').addEventListener('click', () => Modal.lifecycle('archive'));
+  document.getElementById('modal-complete').addEventListener('click', () => Modal.lifecycle('complete'));
+  document.getElementById('modal-audio-retry').addEventListener('click', () => Modal.retryAudio());
+  document.getElementById('modal-audio-delete').addEventListener('click', () => Modal.removeAudio());
+  document.getElementById('setting-export').addEventListener('click', () => Backup.export());
+  document.getElementById('setting-import').addEventListener('change', e => Backup.import(e.target.files[0]).finally(() => { e.target.value = ''; }));
 
   // ── Modal actions
   document.getElementById('modal-backdrop').addEventListener('click', () => Modal.requestClose());

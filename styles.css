@@ -1320,3 +1320,11 @@ summary { color: var(--text-primary); cursor: pointer; padding: 12px 0; }
 /* Search labels distinguish current content from original/history matches. */
 .search-match-label { font-size: 0.75rem; color: #99baff; margin: 6px 0 0; }
 #search-status { margin: 8px 0; min-height: 1.2em; }
+
+/* Archive, backup and retained recording controls */
+.archive-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 8px 0 12px; font-size: 14px; }
+.archive-controls label { display: flex; gap: 6px; align-items: center; min-height: 44px; }
+.archive-controls select, #modal-audio-language { font: inherit; padding: 8px; border: 1px solid #888; border-radius: 6px; background: var(--bg, #fff); color: inherit; }
+.modal-actions { flex-wrap: wrap; }
+.backup-file-label { display: block; margin: 16px 0 8px; }
+#modal-audio-status { color: #a15500; }

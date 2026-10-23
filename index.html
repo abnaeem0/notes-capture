@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>NoteCapture</title>
-  <link rel="stylesheet" href="styles.css?v=semantic-search-1" />
+  <link rel="stylesheet" href="styles.css?v=archive-backup-audio-1" />
 </head>
 <body>
 
@@ -104,6 +104,10 @@
     <div class="list-header">
       <input id="search-input" class="search-input" type="search" placeholder="Search words or describe what you’re looking for…" aria-label="Search notes" />
       <p id="search-status" class="settings-hint" role="status" aria-live="polite"></p>
+      <div class="archive-controls">
+        <label>Show <select id="archive-view"><option value="active">Active notes</option><option value="archived">Archived notes</option><option value="all">All notes</option></select></label>
+        <label><input id="search-include-archived" type="checkbox" checked /> Include archived in search</label>
+      </div>
       <div class="filter-tabs" id="filter-tabs">
         <button class="filter-tab active" data-type="all">All</button>
         <button class="filter-tab" data-type="todo">To-do</button>
@@ -153,7 +157,7 @@
 
       <!-- Audio player — visible only for unprocessed voice notes with saved blob -->
       <div id="modal-audio-wrap" class="modal-audio-wrap hidden">
-        <p class="modal-audio-label">🎙 Saved audio (not yet transcribed)</p>
+        <p class="modal-audio-label">🎙 Saved recording</p>
         <!-- preload=auto buffers the full blob so scrubbing is smooth -->
         <audio id="modal-audio-player" class="modal-audio-player" controls preload="auto"></audio>
         <div class="modal-audio-progress">
@@ -166,7 +170,11 @@
           />
           <span id="modal-audio-duration" class="modal-audio-duration">0:00</span>
         </div>
-        <p class="modal-audio-hint">Play back, then type what you said below and save manually.</p>
+        <details><summary>Latest transcription attempt</summary><p id="modal-audio-transcript" class="history-text" dir="auto"></p></details>
+        <p id="modal-audio-status" class="settings-hint" role="status"></p>
+        <p class="modal-audio-hint">Listen and correct Cleaned, then Reprocess to accept the text. The recording stays until you delete it or a retry passes the quality checks.</p>
+        <label>Retry language <select id="modal-audio-language"><option value="auto">Auto</option><option value="ur">Urdu</option><option value="en">English</option><option value="ar">Arabic</option></select></label>
+        <div class="modal-actions"><button id="modal-audio-retry" class="modal-secondary-btn">Retry transcription</button><button id="modal-audio-delete" class="modal-delete-btn">Delete recording</button></div>
       </div>
 
       <!-- Main editable fields -->
@@ -214,6 +222,8 @@
         <button id="modal-reprocess" class="modal-secondary-btn">Reprocess</button>
       </div>
       <div class="modal-actions">
+        <button id="modal-archive" class="modal-secondary-btn">Archive</button>
+        <button id="modal-complete" class="modal-secondary-btn">Done &amp; archive</button>
         <button id="modal-delete" class="modal-delete-btn">Delete</button>
       </div>
       </div>
@@ -233,7 +243,8 @@
 
       <section class="settings-section">
         <h3 class="settings-label">Passcode</h3>
-        <div class="password-wrap"><input id="setting-passcode" class="settings-input" type="password" placeholder="New passcode" /><button class="password-eye" type="button" aria-label="Show passcode" aria-pressed="false" title="Show passcode"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path class="eye-slash" d="m3 3 18 18" stroke="currentColor" stroke-width="2"/></svg></button></div>
+        <div class="password-wrap"><input id="setting-passcode" class="settings-input" type="password" placeholder="Saved passcode" autocomplete="off" /><button class="password-eye" type="button" aria-label="Show passcode" aria-pressed="false" title="Show passcode"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path class="eye-slash" d="m3 3 18 18" stroke="currentColor" stroke-width="2"/></svg></button></div>
+        <p class="settings-hint">Your saved passcode is loaded here. Use the eye to reveal it, or edit and save to change this browser’s stored value.</p>
         <button id="setting-passcode-save" class="settings-btn">Update passcode</button>
       </section>
 
@@ -245,7 +256,7 @@
 
       <section class="settings-section">
         <label class="settings-label" for="setting-transcription-prompt">Transcription guidance</label>
-        <p class="settings-hint">Automatic language detection for mixed speech. This guides transcription separately from your AI processing prompt.</p>
+        <p class="settings-hint">Blank by default. Automatic language detection handles mixed speech; Urdu recovery is tried if Devanagari appears. Guidance is optional and is not an instruction prompt.</p>
         <textarea id="setting-transcription-prompt" class="settings-prompt-textarea" rows="4"></textarea>
         <div class="settings-prompt-actions"><button id="setting-transcription-save" class="settings-btn">Save guidance</button><button id="setting-transcription-reset" class="settings-btn">Reset guidance</button></div>
       </section>
@@ -323,6 +334,15 @@
         <p class="settings-hint">Setup: add a Workers AI binding named AI to your Cloudflare Worker, then redeploy.</p>
       </section>
 
+      <section class="settings-section">
+        <h3 class="settings-label">Backup &amp; restore</h3>
+        <p class="settings-hint">Export all notes, archives, edits and retained recordings. Import merges by note ID and keeps the newer updated copy; ties keep the existing copy. Passcodes and settings are not included.</p>
+        <button id="setting-export" class="settings-btn">Export full backup</button>
+        <label class="backup-file-label" for="setting-import">Import backup (.json)</label>
+        <input id="setting-import" class="settings-input" type="file" accept=".json,application/json" />
+        <p id="backup-status" class="settings-hint" role="status" aria-live="polite"></p>
+      </section>
+
       <section class="settings-section danger-zone">
         <h3 class="settings-label">Danger zone</h3>
         <button id="setting-clear-all" class="settings-btn danger">Clear all data</button>
@@ -366,6 +386,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=semantic-search-1"></script>
+  <script src="app.js?v=archive-backup-audio-1"></script>
 </body>
 </html>
