@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>NoteCapture</title>
-  <link rel="stylesheet" href="styles.css?v=archive-backup-audio-1" />
+  <link rel="stylesheet" href="styles.css?v=classification-style-2" />
 </head>
 <body>
 
@@ -268,16 +268,16 @@
         <textarea
           id="setting-prompt"
           class="settings-prompt-textarea"
-          placeholder="Leave empty to use the Worker's default (tagging, summary, topic, clarifying questions). Or write your own instructions — e.g. 'Clean up this text and add a Chinese translation below it, like: &lt;cleaned text&gt;&#10;&#10;中文翻译:&#10;&lt;translation&gt;'"
+          placeholder="Leave empty to use default English cleanup. Or customise the note text — e.g. 'Clean up this text and add a Chinese translation below it, like: &lt;cleaned text&gt;&#10;&#10;中文翻译:&#10;&lt;translation&gt;'"
           rows="12"
           spellcheck="false"
         ></textarea>
         <div class="settings-prompt-actions">
-          <button id="setting-prompt-save"  class="settings-btn">Save custom prompt</button>
+          <button id="setting-prompt-save"  class="settings-btn">Save text instructions</button>
           <button id="setting-prompt-reset" class="settings-btn">Reset to default</button>
         </div>
         </div><details id="default-prompt-panel"><summary>View default prompts</summary><p id="default-prompt-status" class="settings-hint" role="status"></p><h4 class="box-label">Processing prompt</h4><pre id="default-processing-prompt" class="prompt-preview"></pre><h4 class="box-label">Transcription guidance</h4><pre id="default-transcription-prompt" class="prompt-preview"></pre></details></div>
-        <p class="settings-hint">A custom prompt fully replaces the default behaviour — no tagging, summarising, topic-matching or clarifying questions run. You just get back whatever your prompt produces, shown as the note's text, plus the original transcript. Reset to go back to the Worker default. Changes apply to the next note processed.</p>
+        <p class="settings-hint">Custom instructions change the note text. Category, tags, summary and clarification still come from the source note. Reset restores default English cleanup. For older notes, open the note and press Reprocess to regenerate its category.</p>
       </section>
 
       <!-- ── DIAGNOSTICS ── Tests each part of the pipeline ── -->
@@ -386,6 +386,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=archive-backup-audio-1"></script>
+  <script src="app.js?v=classification-style-2"></script>
 </body>
 </html>

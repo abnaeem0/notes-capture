@@ -751,6 +751,7 @@ const Queue = {
       }
     } finally {
       this.active.delete(id);
+      if (Modal.currentId === id && !Modal.hasUnsavedChanges()) Modal.refreshProcessed();
       UI.updatePendingBadge();
       if (document.getElementById('screen-notes').classList.contains('active')) Render.renderNotesList();
     }
@@ -788,22 +789,11 @@ const Queue = {
 /** Apply AI result fields onto a note object (mutates note).
  *  Only copies the exact fields we expect — ignores anything extra the AI adds. */
 function _applyAiResult(note, result) {
-  // ── Custom-prompt mode ───────────────────────────────────────
-  // When a custom prompt (Settings → AI Prompt) is active, the Worker
-  // skips its tagging/summarising/clarification pipeline and returns just
-  // { result, transcript }. Everything else (type, summary, topic, fields,
-  // clarification) is left as-is/empty — no extra routing is forced.
+  // Accept old result-only Worker output without erasing existing classification.
   if (typeof result.result === 'string') {
-    note.ai.type               = 'note';
-    note.ai.topics = [];
-    note.ai.topic = '';
-    note.ai.type_confidence    = 'high';
-    note.ai.cleaned_text       = result.result || note.input.raw_text;
-    note.ai.summary            = '';
-    note.ai.fields             = {};
-    note.ai.clarification_needed   = false;
-    note.ai.clarification_question = null;
-    return;
+    result = { ...result, cleaned_text: result.result, type: result.type || note.ai.type || 'note',
+      topics: result.topics || note.ai.topics || [], summary: result.summary ?? note.ai.summary ?? '',
+      fields: result.fields || note.ai.fields || {} };
   }
 
   // ── Default structured mode ──────────────────────────────────
@@ -1313,6 +1303,22 @@ const Modal = {
     document.getElementById('modal-close').focus();
   },
 
+  refreshProcessed() {
+    const note = Store.getNote(this.currentId);
+    if (!note) return;
+    document.getElementById('modal-type').value = _getFinalType(note);
+    document.getElementById('modal-topic').value = _getFinalTags(note).join(', ');
+    document.getElementById('modal-cleaned').value = _getFinalCleanedText(note);
+    document.getElementById('modal-summary').value = _getFinalSummary(note);
+    this._renderFields(note);
+    this._renderHistory(note);
+    this._renderContextPanel(note);
+    const complete = document.getElementById('modal-complete');
+    complete.classList.toggle('hidden', !['todo', 'reminder', 'schedule'].includes(_getFinalType(note)) && !note.user.completed_at);
+    if (!note.input.audio_blob_key) AudioPlayer.hide();
+    this.openSnapshot = this._formSnapshot();
+  },
+
   close(fromBack = false) {
     if (!fromBack && history.state?.ncNote === this.currentId) history.back();
     this.currentId = null;
@@ -1352,7 +1358,9 @@ const Modal = {
       .map(t => t.trim())
       .filter(Boolean);
 
-    note.user.type_override = selectedType !== note.ai.type ? selectedType : null;
+    if (!this.openSnapshot || selectedType !== JSON.parse(this.openSnapshot).type) {
+      note.user.type_override = selectedType !== note.ai.type ? selectedType : null;
+    }
     note.user.cleaned_text  = document.getElementById('modal-cleaned').value.trim();
     note.user.summary       = document.getElementById('modal-summary').value.trim();
 
@@ -1883,7 +1891,7 @@ const Settings = {
     const custom = Store.getPrompt();
     ta.value = custom;
     status.textContent = custom
-      ? 'Using your custom prompt — tagging/summary/clarifying questions are skipped; you get back "result" + the original transcript.'
+      ? 'Custom text instructions are active. Automatic category, tags, summary and clarification still run (requires the updated Worker).'
       : 'Using Worker default prompt (type, summary, topic, fields, clarifying questions).';
   },
 
@@ -1956,6 +1964,14 @@ const UI = {
 // ── 10. INIT ─────────────────────────────────────────────────────
 // Boot sequence. Runs on DOMContentLoaded.
 
+function refreshCaptureType() {
+  const value = Capture.captureTypeOverride || 'auto';
+  document.getElementById('type-label').textContent = CONFIG.TYPES.find(t => t.value === value)?.label || 'Auto';
+  document.querySelectorAll('#type-picker-options .type-opt').forEach(btn => {
+    btn.setAttribute('aria-pressed', String(btn.dataset.type === value));
+  });
+}
+
 function init() {
   Store.migrateNotes();
   // Rebuild the disposable queue after imports or an interrupted queue write.
@@ -2024,6 +2040,9 @@ function init() {
   });
 
   // ── Type badge (capture screen)
+  const savedType = localStorage.getItem(CONFIG.KEYS.CAPTURE_TYPE);
+  Capture.captureTypeOverride = CONFIG.TYPES.some(t => t.value === savedType) ? savedType : null;
+  refreshCaptureType();
   document.getElementById('type-badge').addEventListener('click', () => {
     document.getElementById('type-picker').classList.remove('hidden');
   });
@@ -2037,7 +2056,8 @@ function init() {
     if (!btn) return;
     const val = btn.dataset.type;
     Capture.captureTypeOverride = val === 'auto' ? null : val;
-    document.getElementById('type-label').textContent = val;
+    localStorage.setItem(CONFIG.KEYS.CAPTURE_TYPE, val);
+    refreshCaptureType();
     document.getElementById('type-picker').classList.add('hidden');
   });
 
@@ -2075,6 +2095,13 @@ function init() {
   document.getElementById('modal-audio-delete').addEventListener('click', () => Modal.removeAudio());
   document.getElementById('setting-export').addEventListener('click', () => Backup.export());
   document.getElementById('setting-import').addEventListener('change', e => Backup.import(e.target.files[0]).finally(() => { e.target.value = ''; }));
+
+  document.getElementById('modal-type').addEventListener('change', e => {
+    const note = Store.getNote(Modal.currentId);
+    if (!note) return;
+    note.user.type_override = e.target.value;
+    Modal._renderFields(note);
+  });
 
   // ── Modal actions
   document.getElementById('modal-backdrop').addEventListener('click', () => Modal.requestClose());

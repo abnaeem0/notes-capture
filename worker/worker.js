@@ -1,6 +1,6 @@
 /** NoteCapture stateless Worker. Keep PASSCODE and GROQ_API_KEY in Cloudflare secrets. */
 const API_VERSION = 2;
-const WORKER_VERSION = 'archive-backup-audio-1';
+const WORKER_VERSION = 'classification-style-2';
 const DEFAULT_TRANSCRIPTION_PROMPT = '';
 const DEFAULT_PROCESSING_PROMPT = `You are a personal note classification assistant.
 The input may mix English, Urdu and Arabic. The speaker does not use Hindi or Punjabi.
@@ -122,16 +122,11 @@ async function handleProcess(request, env, cors) {
 
 function buildPrompt(source, body = {}) {
   const metadata = `Capture time: ${body.created_at || body.current_time || 'not provided'}\nCurrent time: ${body.current_time || 'not provided'}\nTimezone: ${body.timezone || 'not provided'}`;
-  if (typeof body.custom_prompt === 'string' && body.custom_prompt.trim()) {
-    return {
-      systemPrompt: `${body.custom_prompt.trim()}\n\nReturn only valid JSON with exactly one key: {"result": string}. Put your entire response in result.`,
-      userMessage: `${metadata}\n\nSource:\n${source}`,
-      custom: true,
-    };
-  }
   const topics = Array.isArray(body.existing_topics) ? body.existing_topics.filter(t => typeof t === 'string').slice(0, 100) : [];
   return {
-    systemPrompt: DEFAULT_PROCESSING_PROMPT,
+    systemPrompt: DEFAULT_PROCESSING_PROMPT + (typeof body.custom_prompt === 'string' && body.custom_prompt.trim()
+      ? `\n\nAdditional text instructions from the user:\n${body.custom_prompt.trim()}\n\nApply those instructions to cleaned_text only. Still return the complete JSON schema above, with type, summary, topics, fields and clarification based on the SOURCE note. Do not classify the formatting instructions. The JSON schema and classification requirement always apply, even if the text instructions ask for plain text or a result-only response.`
+      : ''),
     userMessage: `${metadata}\nExisting tags: ${JSON.stringify(topics)}\nType hint: ${body.type_hint || 'none'}\n\nSource:\n${source}${body.clarification_answer ? `\nUser clarification: ${body.clarification_answer}` : ''}`,
     custom: false,
   };
@@ -204,7 +199,9 @@ async function callGroq(prompt, apiKey) {
     if (data.choices?.[0]?.finish_reason === 'length') return { ok: false, error: 'Groq output exceeded the token limit. Shorten the note or increase output headroom.' };
     const parsed = safeParseJson(data.choices?.[0]?.message?.content || '');
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false, error: 'Groq returned invalid JSON' };
-    if (prompt.custom ? typeof parsed.result !== 'string' : typeof parsed.cleaned_text !== 'string') return { ok: false, error: 'Groq returned an unexpected response shape' };
+    if (typeof parsed.cleaned_text !== 'string') return { ok: false, error: 'Groq returned an unexpected response shape' };
+    parsed.type = String(parsed.type || '').trim().toLowerCase().replace(/^to[- ]do$/, 'todo');
+    if (!['todo', 'reminder', 'schedule', 'idea', 'research', 'note'].includes(parsed.type)) return { ok: false, error: 'AI returned no valid category. Retry processing this note.' };
     return { ok: true, data: parsed };
   } catch (err) { return { ok: false, error: err.message }; }
 }
