@@ -306,7 +306,9 @@
           <button id="setting-prompt-reset" class="settings-btn">Reset to default</button>
         </div>
         </div><details id="default-prompt-panel"><summary>View default prompts</summary><p id="default-prompt-status" class="settings-hint" role="status"></p><h4 class="box-label">Processing prompt</h4><pre id="default-processing-prompt" class="prompt-preview"></pre><h4 class="box-label">Transcription guidance</h4><pre id="default-transcription-prompt" class="prompt-preview"></pre></details></div>
-        <p class="settings-hint">Custom instructions change the note text. Category, tags, summary and clarification still come from the source note. Reset restores default English cleanup. For older notes, open the note and press Reprocess to regenerate its category.</p>
+        <label class="settings-check"><input type="checkbox" id="setting-skip-classify" /> Use my prompt only (turn off category, urgency and questions)</label>
+        <p class="settings-hint">For using the app for something else entirely. Needs a saved prompt above; notes are stored as plain notes with no category or tags. Reprocess older notes to apply it.</p>
+        <p class="settings-hint">Unless the box above is ticked, custom instructions change the note text. Category, tags, summary and clarification still come from the source note. Reset restores default English cleanup. For older notes, open the note and press Reprocess to regenerate its category.</p>
       </section>
 
       <!-- ── DIAGNOSTICS ── Tests each part of the pipeline ── -->

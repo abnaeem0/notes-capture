@@ -1343,3 +1343,5 @@ summary { color: var(--text-primary); cursor: pointer; padding: 12px 0; }
 .modal-copy-btn { min-height: 44px; min-width: 64px; padding: 0 14px; background: var(--bg-raised); color: var(--accent); border: 1px solid var(--border); border-radius: 6px; font-size: .85rem; }
 .modal-copy-btn:active { background: var(--bg-hover); }
 #setting-usage { white-space: pre-wrap; word-break: break-word; }
+.settings-check { display: flex; align-items: center; gap: 10px; min-height: 44px; color: var(--text-primary); font-size: .9rem; }
+.settings-check input { width: 22px; height: 22px; flex: 0 0 auto; }

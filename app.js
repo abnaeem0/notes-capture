@@ -34,6 +34,7 @@ const CONFIG = {
     REASONING:   'nc_ai_reasoning', // reasoning effort sent to the Worker (empty = Worker default)
     USAGE:       'nc_usage',        // per-day Groq usage totals (this device only)
     MD_EXPORTED: 'nc_md_exported',  // note ids already sent to Obsidian: { id: isoDate }
+    SKIP_CLASSIFY: 'nc_skip_classify', // '1' = custom prompt replaces the built-in one (no type/urgency/questions)
   },
 
   // Groq list prices in USD, checked 2026-10-30 against a third-party summary of Groq's pricing page.
@@ -479,9 +480,11 @@ const Backup = {
     const hasText = n => (n.input?.original_text || n.input?.raw_text || n.ai?.cleaned_text || '').trim();
     const withText = Store.getNotes().filter(hasText);
     const held = withText.filter(n => n.status === 'transcription_review');
-    const waiting = withText.filter(n => n.status !== 'transcription_review' && workerSet && (n.status === 'raw' || n.status === 'processing'));
-    const ready = withText.filter(n => !held.includes(n) && !waiting.includes(n));
-    return { ready, held: held.length, waiting: waiting.length };
+    // An unanswered AI question holds a note back until it is answered or dismissed in the app.
+    const asking = withText.filter(n => n.status === 'needs_context' && n.user?.dismissed_question_id !== _questionKey(n));
+    const waiting = withText.filter(n => !held.includes(n) && !asking.includes(n) && workerSet && (n.status === 'raw' || n.status === 'processing'));
+    const ready = withText.filter(n => !held.includes(n) && !asking.includes(n) && !waiting.includes(n));
+    return { ready, held: held.length, asking: asking.length, askingUrgent: asking.filter(n => n.ai?.urgency === 'urgent').length, waiting: waiting.length };
   },
   /** Obsidian export: one .md per note in a ZIP. Each note is sent once (tracked by id) so re-exports never duplicate. Audio is not included. */
   exportMarkdown(all = false) {
@@ -489,16 +492,30 @@ const Backup = {
     try {
       let sent = {};
       try { sent = JSON.parse(localStorage.getItem(CONFIG.KEYS.MD_EXPORTED) || '{}') || {}; } catch { sent = {}; }
-      const { ready, held, waiting } = this.markdownCandidates();
+      const { ready, held, asking, askingUrgent, waiting } = this.markdownCandidates();
       const notes = all ? ready : ready.filter(n => !sent[n.id]);
-      const skipped = [held && `${held} with an uncertain transcript held back (check them in the app first)`, waiting && `${waiting} still processing`].filter(Boolean).join('; ');
+      const skipped = [held && `${held} with an uncertain transcript held back (check them in the app first)`,
+        asking && `${asking} with an open question held back${askingUrgent ? ` (${askingUrgent} urgent)` : ''}; answer or dismiss the question in the app`,
+        waiting && `${waiting} still processing`].filter(Boolean).join('; ');
       if (!notes.length) { this.status(`Nothing new to export.${skipped ? ' ' + skipped + '.' : ''}`); return; }
       const files = notes.map(n => ({ name: noteFilename(n), content: noteToMarkdown(n) }));
       downloadBlob(buildZip(files), `notecapture-obsidian-${new Date().toISOString().slice(0, 10)}.zip`);
       const at = new Date().toISOString();
-      notes.forEach(n => { sent[n.id] = at; });
+      // Obsidian owns a note after export, so the app copy is labelled and archived (never deleted:
+      // it keeps the original text and can be re-exported if the file format improves).
+      let archived = 0;
+      notes.forEach(n => {
+        const first = !sent[n.id];
+        sent[n.id] = at;
+        const fresh = Store.getNote(n.id);
+        if (!fresh) return;
+        fresh.user.exported_at = at;
+        if (first && !fresh.user.archived_at) { fresh.user.archived_at = at; archived++; }
+        Store.saveNote(fresh);
+      });
       localStorage.setItem(CONFIG.KEYS.MD_EXPORTED, JSON.stringify(sent));
-      this.status(`Markdown download started: ${files.length} ${all ? '' : 'new '}note${files.length === 1 ? '' : 's'}.${skipped ? ' ' + skipped + '.' : ''} Unzip into your Obsidian vault's Inbox folder. Obsidian owns these notes now; edits made later in the app are not re-exported unless you choose "Export all again".`);
+      Render.renderNotesList?.();
+      this.status(`Markdown download started: ${files.length} ${all ? '' : 'new '}note${files.length === 1 ? '' : 's'}.${skipped ? ' ' + skipped + '.' : ''} Unzip into your Obsidian vault's Inbox folder.${archived ? ` ${archived} moved to Archived in the app (still searchable, labelled "In Obsidian").` : ''} Obsidian owns these notes now; later edits in the app are not re-exported unless you choose "Export all again".`);
     } catch (err) { this.status(`Markdown export failed: ${err.message}`); }
   },
   async import(file) {
@@ -812,6 +829,7 @@ const Queue = {
         existing_topics: _getExistingTopics(),
         clarification_answer: null,
         custom_prompt: Store.getPrompt() || null,
+        classify: localStorage.getItem(CONFIG.KEYS.SKIP_CLASSIFY) === '1' && Store.getPrompt() ? false : undefined,
         model: localStorage.getItem(CONFIG.KEYS.MODEL) || undefined,
         reasoning_effort: localStorage.getItem(CONFIG.KEYS.REASONING) || undefined,
       };
@@ -1394,6 +1412,7 @@ function _noteCardHTML(note, matchLabel = '') {
       </div>
       <p class="note-summary">${escHtml(summary)}</p>
       <p class="note-time">${time}</p>
+      ${note.user?.exported_at ? '<p class="search-match-label">In Obsidian</p>' : ''}
       ${note.user?.archived_at ? '<p class="search-match-label">Archived</p>' : ''}
       ${note.user?.completed_at ? '<p class="search-match-label">Completed</p>' : ''}
       ${note.status === 'transcription_review' ? '<p class="note-pending-label">Check transcript · audio retained</p>' : ''}
@@ -2087,10 +2106,19 @@ const Settings = {
     if (!ta || !status) return; // older index.html without the prompt editor
 
     const custom = Store.getPrompt();
+    const skip = localStorage.getItem(CONFIG.KEYS.SKIP_CLASSIFY) === '1';
     ta.value = custom;
+    const box = document.getElementById('setting-skip-classify');
+    if (box) box.checked = skip;
     status.textContent = custom
-      ? 'Custom text instructions are active. Automatic category, tags, summary and clarification still run (requires the updated Worker).'
-      : 'Using Worker default prompt (type, summary, topic, fields, clarifying questions).';
+      ? (skip ? 'Your prompt replaces the built-in prompt. Notes are saved as plain notes: no category, urgency or questions.'
+              : 'Custom text instructions are active. Automatic category, tags, summary, urgency and clarification still run (requires the updated Worker).')
+      : 'Using Worker default prompt (type, summary, topic, fields, urgency, clarifying questions).';
+  },
+  saveSkipClassify(on) {
+    if (on) localStorage.setItem(CONFIG.KEYS.SKIP_CLASSIFY, '1'); else localStorage.removeItem(CONFIG.KEYS.SKIP_CLASSIFY);
+    this.loadPrompt();
+    UI.showToast(on ? 'Classification off: your prompt is used on its own' : 'Classification back on', 'ok');
   },
 
   /** Save (or clear, if empty) the custom prompt override. */
@@ -2316,6 +2344,7 @@ function init() {
   document.getElementById('modal-save').addEventListener('click',      () => Modal.save());
   document.getElementById('modal-reprocess')?.addEventListener('click', () => Modal.reprocess());
   document.getElementById('modal-copy')?.addEventListener('click', () => Modal.copyCleaned());
+  document.getElementById('setting-skip-classify')?.addEventListener('change', e => Settings.saveSkipClassify(e.target.checked));
   document.getElementById('setting-model')?.addEventListener('change', () => Settings.saveAiSettings());
   document.getElementById('setting-reasoning')?.addEventListener('change', () => Settings.saveAiSettings());
   document.getElementById('setting-usage-reset')?.addEventListener('click', () => {

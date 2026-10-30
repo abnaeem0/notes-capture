@@ -28,13 +28,18 @@ Tests mock the DOM with `vm`; there is no browser test. Check UI changes by hand
 ## Obsidian export (`Backup.exportMarkdown`)
 - One `.md` per note in a ZIP: frontmatter (id, type, status, urgent, due/when/where, tags, source, created, updated) + English text + `## Original`.
 - **Each note is exported once**, tracked by id in `nc_md_exported`, so unzipping never duplicates. After export Obsidian owns the note; later edits in the app do not flow back. "Export all again" exists but can duplicate.
-- Held back until resolved: notes with an uncertain transcript (`transcription_review`; the audio only exists in the app) and notes still processing when a Worker is configured.
+- After export the app copy gets `user.exported_at` (shown as "In Obsidian") and is archived, never deleted. It keeps the original text and lets us re-export if the file format improves. Archiving only happens on a note's first export.
+- Held back until resolved: notes with an uncertain transcript (`transcription_review`; the audio only exists in the app), notes with an unanswered AI question (answer or dismiss it in the app; the status line says how many are urgent), and notes still processing when a Worker is configured.
 - Filenames are stable per note: `YYYY-MM-DD-slug-<id8>.md`. Renaming in Obsidian is fine; the `id` in frontmatter is the identity.
 
 ## To-do
 Planned work and open ideas live in `TODO.md`. Read it before starting a feature, and move items out of it when they ship.
 
+## Custom prompt
+A saved custom prompt rewrites `cleaned_text` only; type, tags, urgency and questions still run from the built-in prompt. With the "Use my prompt only" box ticked (`nc_skip_classify`, sent as `classify: false`), the Worker uses the user's prompt on its own and returns a plain `note` with no summary, tags, urgency or questions. The flag is ignored when no custom prompt is saved.
+
 ## Known limits
+- Audio is deleted from the device as soon as a transcript passes the quality checks. Only uncertain transcripts keep their recording, until you retry successfully or delete it.
 - Android Chrome cannot write straight into a folder, so export is download-and-unzip.
 - Usage numbers are per device and include only calls that reached a Worker response.
 - Roman Urdu has no fixed spelling; notes are translated to English first, and search/AI run on the English text.

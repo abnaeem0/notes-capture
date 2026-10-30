@@ -4,15 +4,17 @@ Product ideas and planned work. Instructions for Claude live in `CLAUDE.md`.
 
 ## Next
 - [ ] **Waiting / who / project.** `waiting` status and `who` field for handed-off tasks. `project` stored as an Obsidian link (`[[Project]]`) so renames propagate. Collapse the six types toward Note / Task / Idea, with date and reminder as attributes.
-- [ ] **Mark exported notes in the app.** Show an "In Obsidian" label and optionally auto-archive on export (never delete: the app copy is the only backup with the audio, and the only place the AI can reprocess).
 - [ ] **Test the new clarification prompt on the live model** with real notes, and adjust `DEFAULT_PROCESSING_PROMPT` in `worker.js`:
   - "Court hearing next Tuesday" → urgent; ask the time and which court.
   - "Have to submit the form today" → urgent; ask which form / where if unclear.
   - "Call Sarah about the budget" → not urgent; at most ask for a deadline.
   - "Maybe a blog about maintenance" → idea; no question.
-- [ ] **Decide:** hold notes that still have an open question back from export (like uncertain transcripts), or export them with a `needs:` property.
+
+- [ ] **Decide what the app copy does after export.** Exported notes are labelled "In Obsidian" and archived, never deleted (the app copy allows re-export if the file format changes). Audio is already deleted for confident transcripts, so the app copy holds only text. Still open: block edits on exported notes?
+- [ ] **Open in Obsidian button.** Link `obsidian://adv-uri?vault=<name>&uid=<id>` using the Advanced URI plugin, which finds a note by a frontmatter id even after it is moved or renamed. Needs: export the id as `uid` (check the plugin's frontmatter field name), a vault-name setting in the app, and the plugin installed. Verify the link opens Obsidian from Chrome on the phone. A follow-up note started from the app would go in the Inbox with a `[[link]]` to the old note, not into the same folder (the app cannot know where the old note was moved).
 
 ## Later
+- [ ] **Obsidian vault setup** (not code; do on the phone). Create the vault in a normal folder such as Documents so Files can unzip into it. Make an `Inbox/` folder. Build saved views (Bases) over the frontmatter: Urgent, Due this week, Needs attention (`needs:` set or `due` empty), Waiting once that status exists. Try Smart Connections with a multilingual embedding model (bge-m3 or Gemini embeddings) for related-note suggestions. Obsidian 1.11 has official Android widgets for New Note and Daily Note.
 - [ ] **Personal dictionary.** Names and terms (people, places, courts, Urdu words) fed into the Whisper prompt (700 character limit) and the classifier. Lives in the app because transcription happens before notes reach Obsidian. Today only "Transcription guidance" exists.
 - [ ] **Project list in the app.** Sent to the classifier like `existing_topics` so capture can suggest a project.
 - [ ] **Link suggestions at capture** using the existing `bge-m3` search index ("this looks related to X, link it?").
