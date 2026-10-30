@@ -30,6 +30,20 @@ const CONFIG = {
     PROMPT:      'nc_custom_prompt',// custom AI prompt override (empty = Worker default)
     INCLUDE_ARCHIVED: 'nc_include_archived',
     DATA_VERSION:'nc_data_version', // note schema migration version
+    MODEL:       'nc_ai_model',     // chat model sent to the Worker (empty = Worker default)
+    REASONING:   'nc_ai_reasoning', // reasoning effort sent to the Worker (empty = Worker default)
+    USAGE:       'nc_usage',        // per-day Groq usage totals (this device only)
+    MD_EXPORTED: 'nc_md_exported',  // note ids already sent to Obsidian: { id: isoDate }
+  },
+
+  // Groq list prices in USD, checked 2026-10-30 against a third-party summary of Groq's pricing page.
+  // Confirm at https://console.groq.com/docs/models before budgeting; edit here if they change.
+  PRICES: {
+    chat: {
+      'openai/gpt-oss-20b':  { in: 0.075, out: 0.30 },  // per 1M tokens
+      'openai/gpt-oss-120b': { in: 0.15,  out: 0.60 },
+    },
+    whisper_per_hour: 0.111, // whisper-large-v3, per audio hour
   },
 
   API_VERSION: 2,
@@ -317,6 +331,122 @@ function validateBackup(data) {
   return data.notes.map(normalizeNote);
 }
 
+/* ── Groq usage (this device only) ───────────────────────────────────────── */
+const Usage = {
+  load() {
+    try { const u = JSON.parse(localStorage.getItem(CONFIG.KEYS.USAGE) || '{}'); return u && typeof u.days === 'object' && u.days ? u : { days: {} }; }
+    catch { return { days: {} }; }
+  },
+  dayKey(d = new Date()) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; },
+  /** Estimated USD for one usage record. Unknown models are priced as the default model. */
+  cost(u) {
+    const p = CONFIG.PRICES.chat[u.model] || CONFIG.PRICES.chat['openai/gpt-oss-20b'];
+    return ((u.prompt_tokens || 0) * p.in + (u.completion_tokens || 0) * p.out) / 1e6 + ((u.audio_seconds || 0) / 3600) * CONFIG.PRICES.whisper_per_hour;
+  },
+  /** Add the usage block from a Worker response. completion_tokens already includes reasoning tokens. */
+  record(u) {
+    if (!u || typeof u !== 'object') return;
+    const n = v => (Number.isFinite(v) && v > 0 ? v : 0);
+    const add = { prompt: n(u.prompt_tokens), completion: n(u.completion_tokens), reasoning: n(u.reasoning_tokens), audio_s: n(u.audio_seconds) };
+    if (!add.prompt && !add.completion && !add.audio_s) return;
+    try {
+      const all = this.load(), key = this.dayKey();
+      const d = all.days[key] || (all.days[key] = { calls: 0, prompt: 0, completion: 0, reasoning: 0, audio_s: 0, cost: 0 });
+      d.calls += 1; d.prompt += add.prompt; d.completion += add.completion; d.reasoning += add.reasoning; d.audio_s += add.audio_s;
+      d.cost += this.cost({ model: u.model, prompt_tokens: add.prompt, completion_tokens: add.completion, audio_seconds: add.audio_s });
+      Object.keys(all.days).sort().slice(0, -120).forEach(k => delete all.days[k]); // keep ~4 months
+      localStorage.setItem(CONFIG.KEYS.USAGE, JSON.stringify(all));
+    } catch { /* usage display is best-effort; never block note processing */ }
+  },
+  /** Totals for the last `days` days including today; null = all stored days. */
+  total(days = null) {
+    const t = { calls: 0, prompt: 0, completion: 0, reasoning: 0, audio_s: 0, cost: 0 };
+    const cutoff = days ? this.dayKey(new Date(Date.now() - (days - 1) * 86400000)) : '';
+    for (const [k, d] of Object.entries(this.load().days)) {
+      if (k < cutoff) continue;
+      for (const f of Object.keys(t)) t[f] += d[f] || 0;
+    }
+    return t;
+  },
+  money(v) { return v < 0.01 && v > 0 ? '<$0.01' : `$${v.toFixed(v < 1 ? 3 : 2)}`; },
+  line(label, t) {
+    return `${label}: ${t.calls} call${t.calls === 1 ? '' : 's'} · ${t.prompt.toLocaleString()} in / ${t.completion.toLocaleString()} out tokens (${t.reasoning.toLocaleString()} reasoning) · ${(t.audio_s / 60).toFixed(1)} audio min · ≈ ${this.money(t.cost)}`;
+  },
+  describe() {
+    const month = this.total(30);
+    const lines = [this.line('Today', this.total(1)), this.line('Last 7 days', this.total(7)), this.line('Last 30 days', month)];
+    lines.push(month.calls ? `At your 30-day average, 1,000 notes would cost ≈ ${this.money(month.cost / month.calls * 1000)}.` : 'Process a few notes to see an average cost per 1,000 notes.');
+    return lines;
+  },
+};
+
+/* ── Markdown export (Obsidian) ─────────────────────────────────────────── */
+const MD_FIELD_KEYS = { due_datetime: 'due', datetime: 'when', location: 'where', event_name: 'event', action: 'action', priority: 'priority', follow_up_question: 'follow_up' };
+
+function _yamlStr(v) { return JSON.stringify(String(v)); } // JSON strings are valid YAML double-quoted scalars
+
+function noteFilename(note) {
+  const day = String(note.created_at || '').slice(0, 10) || 'undated';
+  const slug = String(_getFinalSummary(note) || _getFinalCleanedText(note) || 'note')
+    .normalize('NFKD').replace(/[^\x00-\x7F]/g, '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '') || 'note';
+  return `${day}-${slug}-${String(note.id).replace(/[^a-zA-Z0-9]/g, '').slice(0, 8)}.md`;
+}
+
+/** One note → Obsidian Markdown. Stable per note id, so re-exports overwrite rather than duplicate. */
+function noteToMarkdown(note) {
+  const type = _getFinalType(note);
+  const fields = _getFinalFields(note);
+  const tags = _getFinalTags(note).map(t => t.replace(/\s+/g, '-'));
+  const cleaned = _getFinalCleanedText(note);
+  const original = (note.input?.original_text || note.input?.raw_text || '').trim();
+  const summary = _getFinalSummary(note);
+  const lines = ['---', `id: ${_yamlStr(note.id)}`, `type: ${type}`,
+    `status: ${note.user?.completed_at ? 'done' : note.status === 'transcription_review' ? 'needs-review' : 'open'}`];
+  if (note.ai?.urgency === 'urgent') {
+    lines.push('urgent: true');
+    if (note.ai.urgency_reason) lines.push(`urgent_reason: ${_yamlStr(note.ai.urgency_reason)}`);
+  }
+  for (const [k, v] of Object.entries(fields)) {
+    if (v != null && String(v).trim() !== '' && MD_FIELD_KEYS[k]) lines.push(`${MD_FIELD_KEYS[k]}: ${_yamlStr(v)}`);
+  }
+  lines.push(`tags: [${tags.map(_yamlStr).join(', ')}]`, `source: ${note.input?.mode || 'text'}`,
+    `created: ${_yamlStr(note.created_at || '')}`, `updated: ${_yamlStr(note.updated_at || '')}`);
+  if (note.user?.archived_at) lines.push('archived: true');
+  if (note.status === 'needs_context' && note.ai?.clarification_question) lines.push(`needs: ${_yamlStr(note.ai.clarification_question)}`);
+  lines.push('---', '');
+  if (summary) lines.push(`# ${summary.replace(/\s+/g, ' ')}`, '');
+  lines.push(cleaned.trim());
+  if (original && original !== cleaned.trim()) lines.push('', '## Original', '', original);
+  return lines.join('\n') + '\n';
+}
+
+/** Minimal store-only ZIP writer (no dependency). Names and contents are UTF-8. */
+function buildZip(files) {
+  const enc = new TextEncoder();
+  const table = Array.from({ length: 256 }, (_, n) => { for (let k = 0; k < 8; k++) n = n & 1 ? 0xEDB88320 ^ (n >>> 1) : n >>> 1; return n >>> 0; });
+  const crc32 = b => { let c = 0xFFFFFFFF; for (const x of b) c = table[(c ^ x) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+  const d = new Date(), dosTime = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1),
+    dosDate = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  const parts = [], central = []; let offset = 0;
+  for (const f of files) {
+    const name = enc.encode(f.name), data = enc.encode(f.content), crc = crc32(data);
+    const local = new DataView(new ArrayBuffer(30));
+    [[0, 0x04034b50, 4], [4, 20, 2], [6, 0x0800, 2], [8, 0, 2], [10, dosTime, 2], [12, dosDate, 2], [14, crc, 4], [18, data.length, 4], [22, data.length, 4], [26, name.length, 2], [28, 0, 2]]
+      .forEach(([o, v, s]) => s === 4 ? local.setUint32(o, v, true) : local.setUint16(o, v, true));
+    const cen = new DataView(new ArrayBuffer(46));
+    [[0, 0x02014b50, 4], [4, 20, 2], [6, 20, 2], [8, 0x0800, 2], [10, 0, 2], [12, dosTime, 2], [14, dosDate, 2], [16, crc, 4], [20, data.length, 4], [24, data.length, 4], [28, name.length, 2], [30, 0, 2], [32, 0, 2], [34, 0, 2], [36, 0, 2], [38, 0, 4], [42, offset, 4]]
+      .forEach(([o, v, s]) => s === 4 ? cen.setUint32(o, v, true) : cen.setUint16(o, v, true));
+    parts.push(new Uint8Array(local.buffer), name, data); central.push(new Uint8Array(cen.buffer), name);
+    offset += 30 + name.length + data.length;
+  }
+  const cdSize = central.reduce((s, p) => s + p.length, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
+  end.setUint32(12, cdSize, true); end.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: 'application/zip' });
+}
+
 const Backup = {
   busy: false,
   lock() {
@@ -342,6 +472,34 @@ const Backup = {
       this.status(`Backup download started: ${notes.length} notes and ${audio.length} recordings. Keep the downloaded file safe.`);
     } catch (err) { this.status(`Export failed: ${err.message}`); }
     finally { this.unlock(); }
+  },
+  /** Notes that can go to Obsidian now: have text, finished AI processing (or no Worker is set), and no uncertain transcript. */
+  markdownCandidates() {
+    const workerSet = !!Store.getWorkerUrl();
+    const hasText = n => (n.input?.original_text || n.input?.raw_text || n.ai?.cleaned_text || '').trim();
+    const withText = Store.getNotes().filter(hasText);
+    const held = withText.filter(n => n.status === 'transcription_review');
+    const waiting = withText.filter(n => n.status !== 'transcription_review' && workerSet && (n.status === 'raw' || n.status === 'processing'));
+    const ready = withText.filter(n => !held.includes(n) && !waiting.includes(n));
+    return { ready, held: held.length, waiting: waiting.length };
+  },
+  /** Obsidian export: one .md per note in a ZIP. Each note is sent once (tracked by id) so re-exports never duplicate. Audio is not included. */
+  exportMarkdown(all = false) {
+    if (this.busy) return;
+    try {
+      let sent = {};
+      try { sent = JSON.parse(localStorage.getItem(CONFIG.KEYS.MD_EXPORTED) || '{}') || {}; } catch { sent = {}; }
+      const { ready, held, waiting } = this.markdownCandidates();
+      const notes = all ? ready : ready.filter(n => !sent[n.id]);
+      const skipped = [held && `${held} with an uncertain transcript held back (check them in the app first)`, waiting && `${waiting} still processing`].filter(Boolean).join('; ');
+      if (!notes.length) { this.status(`Nothing new to export.${skipped ? ' ' + skipped + '.' : ''}`); return; }
+      const files = notes.map(n => ({ name: noteFilename(n), content: noteToMarkdown(n) }));
+      downloadBlob(buildZip(files), `notecapture-obsidian-${new Date().toISOString().slice(0, 10)}.zip`);
+      const at = new Date().toISOString();
+      notes.forEach(n => { sent[n.id] = at; });
+      localStorage.setItem(CONFIG.KEYS.MD_EXPORTED, JSON.stringify(sent));
+      this.status(`Markdown download started: ${files.length} ${all ? '' : 'new '}note${files.length === 1 ? '' : 's'}.${skipped ? ' ' + skipped + '.' : ''} Unzip into your Obsidian vault's Inbox folder. Obsidian owns these notes now; edits made later in the app are not re-exported unless you choose "Export all again".`);
+    } catch (err) { this.status(`Markdown export failed: ${err.message}`); }
   },
   async import(file) {
     if (!file || this.busy) return;
@@ -654,6 +812,8 @@ const Queue = {
         existing_topics: _getExistingTopics(),
         clarification_answer: null,
         custom_prompt: Store.getPrompt() || null,
+        model: localStorage.getItem(CONFIG.KEYS.MODEL) || undefined,
+        reasoning_effort: localStorage.getItem(CONFIG.KEYS.REASONING) || undefined,
       };
 
       // Attach audio if present
@@ -686,6 +846,7 @@ const Queue = {
       }
 
       const data = await res.json();
+      Usage.record(data.usage); // tokens/audio are billed even when the note later fails or needs review
       const stored = Store.getNote(id);
       if (!stored) return;
       note.user = stored.user; // preserve edits saved while the request was in flight
@@ -809,6 +970,8 @@ function _applyAiResult(note, result) {
   note.ai.fields             = _sanitiseFields(result.type, result.fields || {});
   note.ai.clarification_needed   = !!result.clarification_needed;
   note.ai.clarification_question = result.clarification_question || null;
+  note.ai.urgency                = result.urgency === 'urgent' ? 'urgent' : 'normal';
+  note.ai.urgency_reason         = note.ai.urgency === 'urgent' ? (result.urgency_reason || null) : null;
 }
 
 /** Strip AI fields to only the allowed keys for each note type.
@@ -1226,6 +1389,7 @@ function _noteCardHTML(note, matchLabel = '') {
     <div class="note-card ${needsCtx} ${isPending}" data-id="${escHtml(note.id)}" data-type="${escHtml(type)}">
       <div class="note-card-top">
         <span class="note-type-badge ${type}">${escHtml(label)}</span>
+        ${note.ai?.urgency === 'urgent' ? `<span class="note-urgent-badge" title="${escHtml(note.ai.urgency_reason || 'Urgent')}">Urgent</span>` : ''}
         ${topic ? `<span class="note-topic">${escHtml(topic)}</span>` : ''}
       </div>
       <p class="note-summary">${escHtml(summary)}</p>
@@ -1425,6 +1589,21 @@ const Modal = {
       note.input.audio_blob_key = null;
       Store.saveNote(note); AudioPlayer.hide();
     } catch (err) { UI.showToast(err.message, 'error'); }
+  },
+
+  /** Copy the text currently in the Cleaned box (including unsaved edits) to share elsewhere. */
+  async copyCleaned() {
+    const ta = document.getElementById('modal-cleaned');
+    const text = (ta.value || '').trim();
+    if (!text) { UI.showToast('Nothing to copy'); return; }
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+      else throw new Error('Clipboard API unavailable');
+    } catch {
+      try { ta.focus(); ta.select(); if (!document.execCommand('copy')) throw new Error('copy refused'); ta.setSelectionRange?.(ta.value.length, ta.value.length); }
+      catch { UI.showToast('Copy failed. Select the text and copy it manually.', 'error'); return; }
+    }
+    UI.showToast('Copied', 'ok');
   },
 
   delete() {
@@ -1823,6 +2002,7 @@ const Settings = {
     document.getElementById('setting-search-status').textContent = Search.message || 'Search index updates automatically when online.';
     this.loadPrompt();
     document.getElementById('setting-transcription-prompt').value = Store.getTranscriptionPrompt();
+    this.loadAiSettings();
 
     // Show pending queue details including last errors
     const pendingIds = Store.getPending();
@@ -1883,6 +2063,24 @@ const Settings = {
   },
 
   /** Populate the prompt textarea + status line from storage. */
+  /** Model + reasoning pickers and the usage readout. */
+  loadAiSettings() {
+    const model = localStorage.getItem(CONFIG.KEYS.MODEL) || '', effort = localStorage.getItem(CONFIG.KEYS.REASONING) || '';
+    document.getElementById('setting-model').value = model;
+    document.getElementById('setting-reasoning').value = effort;
+    document.getElementById('setting-model-status').textContent = `Active: ${model || 'Worker default'} · reasoning ${effort || 'Worker default'}. Applies to the next note processed; use Reprocess on older notes.`;
+    this.loadUsage();
+  },
+  loadUsage() { document.getElementById('setting-usage').textContent = Usage.describe().join('\n\n'); },
+  saveAiSettings() {
+    for (const [id, key] of [['setting-model', CONFIG.KEYS.MODEL], ['setting-reasoning', CONFIG.KEYS.REASONING]]) {
+      const v = document.getElementById(id).value;
+      if (v) localStorage.setItem(key, v); else localStorage.removeItem(key);
+    }
+    this.loadAiSettings();
+    UI.showToast('AI settings saved', 'ok');
+  },
+
   loadPrompt() {
     const ta     = document.getElementById('setting-prompt');
     const status = document.getElementById('setting-prompt-status');
@@ -2094,6 +2292,7 @@ function init() {
   document.getElementById('modal-audio-retry').addEventListener('click', () => Modal.retryAudio());
   document.getElementById('modal-audio-delete').addEventListener('click', () => Modal.removeAudio());
   document.getElementById('setting-export').addEventListener('click', () => Backup.export());
+  document.getElementById('setting-export-md').addEventListener('click', () => Backup.exportMarkdown());
   document.getElementById('setting-import').addEventListener('change', e => Backup.import(e.target.files[0]).finally(() => { e.target.value = ''; }));
 
   document.getElementById('modal-type').addEventListener('change', e => {
@@ -2116,6 +2315,16 @@ function init() {
   });
   document.getElementById('modal-save').addEventListener('click',      () => Modal.save());
   document.getElementById('modal-reprocess')?.addEventListener('click', () => Modal.reprocess());
+  document.getElementById('modal-copy')?.addEventListener('click', () => Modal.copyCleaned());
+  document.getElementById('setting-model')?.addEventListener('change', () => Settings.saveAiSettings());
+  document.getElementById('setting-reasoning')?.addEventListener('change', () => Settings.saveAiSettings());
+  document.getElementById('setting-usage-reset')?.addEventListener('click', () => {
+    if (!confirm('Reset the usage counters on this device?')) return;
+    localStorage.removeItem(CONFIG.KEYS.USAGE); Settings.loadUsage(); UI.showToast('Usage counters reset', 'ok');
+  });
+  document.getElementById('setting-export-md-all')?.addEventListener('click', () => {
+    if (confirm('Export every note again? Files already in your Obsidian vault will be duplicated or overwritten when you unzip.')) Backup.exportMarkdown(true);
+  });
   document.getElementById('modal-delete').addEventListener('click',    () => Modal.delete());
 
   document.getElementById('context-dismiss')?.addEventListener('click', () => Modal.dismissContextQuestion());

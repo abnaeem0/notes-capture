@@ -2,7 +2,7 @@ const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert/st
 const values=new Map(), elements=new Map(), blobs=new Map();
 function el(id){if(!elements.has(id))elements.set(id,{value:'',type:'password',textContent:'',classList:{contains:()=>false,add(){},remove(){},toggle(){}},setAttribute(k,v){this[k]=v},parentElement:{querySelector:()=>el('eye')},querySelectorAll:()=>[],focus(){}});return elements.get(id)}
 const storage={getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,String(v)),removeItem:k=>values.delete(k)};
-const context=vm.createContext({console,localStorage:storage,Blob,File,atob,btoa,crypto,URL,Intl,Date,JSON,Set,Map,Uint8Array,Number,String,Object,Array,Error,Promise,Response,Request,
+const context=vm.createContext({console,requestAnimationFrame:f=>f(),localStorage:storage,Blob,File,atob,btoa,crypto,URL,Intl,Date,JSON,Set,Map,Uint8Array,Number,String,Object,Array,Error,Promise,Response,Request,
  document:{getElementById:el,querySelectorAll:()=>[],querySelector:()=>el('eye'),addEventListener(){}},
  navigator:{onLine:true},window:{addEventListener(){}},setTimeout:()=>0,clearTimeout(){},setInterval:()=>0,confirm:()=>true,location:{reload(){}},history:{state:null,back(){},pushState(){}}
 });

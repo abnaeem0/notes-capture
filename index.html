@@ -178,7 +178,10 @@
       </div>
 
       <!-- Main editable fields -->
-      <label class="box-label" for="modal-cleaned">Cleaned</label>
+      <div class="modal-label-row">
+        <label class="box-label" for="modal-cleaned">Cleaned</label>
+        <button id="modal-copy" class="modal-copy-btn" type="button" aria-label="Copy cleaned text">Copy</button>
+      </div>
       <textarea id="modal-cleaned" class="modal-textarea" placeholder="Note content…" rows="5"></textarea>
       <label class="box-label" for="modal-summary">Summary</label>
       <input id="modal-summary" class="modal-summary-input" type="text" placeholder="Summary…" />
@@ -252,6 +255,32 @@
         <h3 class="settings-label">Pending queue</h3>
         <p id="setting-pending-info" class="settings-hint"></p>
         <button id="setting-retry-all" class="settings-btn">Retry all pending</button>
+      </section>
+
+      <section class="settings-section">
+        <h3 class="settings-label">AI model</h3>
+        <p class="settings-hint">Used for cleanup, category, urgency and questions. Higher reasoning can ask better questions but uses more tokens and takes longer. Transcription always uses Whisper Large V3.</p>
+        <label class="box-label" for="setting-model">Model</label>
+        <select id="setting-model" class="settings-input">
+          <option value="">Worker default (gpt-oss-20b)</option>
+          <option value="openai/gpt-oss-20b">gpt-oss-20b · cheapest</option>
+          <option value="openai/gpt-oss-120b">gpt-oss-120b · stronger, about 2× the price</option>
+        </select>
+        <label class="box-label" for="setting-reasoning">Reasoning effort</label>
+        <select id="setting-reasoning" class="settings-input">
+          <option value="">Worker default (medium)</option>
+          <option value="low">Low · fastest, fewest tokens</option>
+          <option value="medium">Medium</option>
+          <option value="high">High · slowest, most tokens</option>
+        </select>
+        <p id="setting-model-status" class="settings-hint" role="status"></p>
+      </section>
+
+      <section class="settings-section">
+        <h3 class="settings-label">Groq usage (this device)</h3>
+        <p class="settings-hint">Counted from each Worker response. Other devices, deleted app data and Diagnostics calls are not included. Costs are estimates from list prices in app.js; check your Groq console for the real bill.</p>
+        <pre id="setting-usage" class="prompt-preview" role="status"></pre>
+        <button id="setting-usage-reset" class="settings-btn">Reset usage counters</button>
       </section>
 
       <section class="settings-section">
@@ -338,6 +367,8 @@
         <h3 class="settings-label">Backup &amp; restore</h3>
         <p class="settings-hint">Export all notes, archives, edits and retained recordings. Import merges by note ID and keeps the newer updated copy; ties keep the existing copy. Passcodes and settings are not included.</p>
         <button id="setting-export" class="settings-btn">Export full backup</button>
+        <button id="setting-export-md" class="settings-btn">Export new notes to Obsidian (.zip)</button>
+        <button id="setting-export-md-all" class="settings-btn">Export all again (may duplicate)</button>
         <label class="backup-file-label" for="setting-import">Import backup (.json)</label>
         <input id="setting-import" class="settings-input" type="file" accept=".json,application/json" />
         <p id="backup-status" class="settings-hint" role="status" aria-live="polite"></p>
