@@ -31,18 +31,8 @@ Tests mock the DOM with `vm`; there is no browser test. Check UI changes by hand
 - Held back until resolved: notes with an uncertain transcript (`transcription_review`; the audio only exists in the app) and notes still processing when a Worker is configured.
 - Filenames are stable per note: `YYYY-MM-DD-slug-<id8>.md`. Renaming in Obsidian is fine; the `id` in frontmatter is the identity.
 
-## Backlog (decided, not built)
-1. **Waiting / who / project.** Add a `waiting` status and `who` field for handed-off tasks; add `project` (stored as an Obsidian link `[[Project]]` so renames propagate). Collapse the six types toward Note / Task / Idea with date and reminder as attributes.
-2. **Personal dictionary.** Names and terms (people, places, courts, Urdu words) fed into the Whisper prompt (700 char limit) and the classifier. Lives in the app because transcription happens before notes reach Obsidian. Today only "Transcription guidance" exists.
-3. **Project list.** Master list in the app, sent to the classifier like `existing_topics`, so capture can suggest a project. Obsidian is the source of truth for the notes themselves.
-4. **Link suggestions at capture** using the existing `bge-m3` search index ("this looks related to X, link it?").
-5. **Tone.** Tone and urgency are lost in transcription. Ideas to revisit: have the user mark urgency with one tap at capture; keep Whisper's per-segment signals; or run a prosody check on the audio (volume, pace) and pass a short hint to the classifier. Not decided.
-6. **Clarification quality.** The prompt now treats urgent or high-stakes notes (court dates, "today") as needing date, time, place and person. It is untested against the live model. Test with these and adjust the prompt in `worker.js`:
-   - "Court hearing next Tuesday" → should ask time and court.
-   - "Have to submit the form today" → urgent; ask what form / where if unclear.
-   - "Call Sarah about the budget" → no urgency; ask at most for a deadline.
-   - "Maybe a blog about maintenance" → idea; no question.
-7. **Obsidian automation.** The export is a manual download then unzip into the vault. FolderSync or Syncthing could watch Downloads later.
+## To-do
+Planned work and open ideas live in `TODO.md`. Read it before starting a feature, and move items out of it when they ship.
 
 ## Known limits
 - Android Chrome cannot write straight into a folder, so export is download-and-unzip.
