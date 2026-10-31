@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>NoteCapture</title>
-  <link rel="stylesheet" href="styles.css?v=classification-style-2" />
+  <link rel="stylesheet" href="styles.css?v=storage-1" />
 </head>
 <body>
 
@@ -102,6 +102,13 @@
   <!-- ─── NOTES LIST SCREEN ─────────────────────────────────────── -->
   <div id="screen-notes" class="screen">
     <div class="list-header">
+      <div id="backup-banner" class="backup-banner hidden" role="status">
+        <p id="backup-banner-text" class="backup-banner-text"></p>
+        <div class="backup-banner-actions">
+          <button id="backup-banner-now" class="settings-btn">Back up now</button>
+          <button id="backup-banner-later" class="settings-btn">Later</button>
+        </div>
+      </div>
       <input id="search-input" class="search-input" type="search" placeholder="Search words or describe what you’re looking for…" aria-label="Search notes" />
       <p id="search-status" class="settings-hint" role="status" aria-live="polite"></p>
       <div class="archive-controls">
@@ -367,9 +374,11 @@
 
       <section class="settings-section">
         <h3 class="settings-label">Backup &amp; restore</h3>
-        <p class="settings-hint">Export all notes, archives, edits and retained recordings. Import merges by note ID and keeps the newer updated copy; ties keep the existing copy. Passcodes and settings are not included.</p>
+        <p class="settings-hint">Your notes exist only on this device. Export all notes, archives, edits and retained recordings, and keep the file somewhere safe (for example Google Drive). Import merges by note ID and keeps the newer updated copy; ties keep the existing copy. Passcodes and settings are not included.</p>
+        <p id="backup-last" class="settings-hint" role="status"></p>
+        <p id="storage-status" class="settings-hint" role="status"></p>
         <button id="setting-export" class="settings-btn">Export full backup</button>
-        <button id="setting-export-md" class="settings-btn">Export new notes to Obsidian (.zip)</button>
+        <button id="setting-export-md" class="settings-btn">Export new notes to Obsidian (.zip, optional copy)</button>
         <button id="setting-export-md-all" class="settings-btn">Export all again (may duplicate)</button>
         <label class="backup-file-label" for="setting-import">Import backup (.json)</label>
         <input id="setting-import" class="settings-input" type="file" accept=".json,application/json" />
@@ -419,6 +428,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=classification-style-2"></script>
+  <script src="app.js?v=storage-1"></script>
 </body>
 </html>

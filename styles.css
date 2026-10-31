@@ -627,6 +627,20 @@ a { color: var(--accent); }
 
 .modal-topic-input:focus { border-color: var(--accent); color: var(--text-primary); }
 
+/* Backup reminder (notes screen) */
+.backup-banner {
+  background: rgba(232,160,48,0.08);
+  border: 1px solid rgba(232,160,48,0.3);
+  border-radius: var(--radius-md);
+  padding: 0.75rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.backup-banner.hidden { display: none; }
+.backup-banner-text { font-size: 0.85rem; line-height: 1.4; color: var(--text-primary); }
+.backup-banner-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
 /* Clarification banner */
 .clarif-banner {
   background: rgba(232,160,48,0.08);

@@ -25,7 +25,7 @@ The app is the main home for notes. Obsidian markdown is a backup to export to a
 - `styles.css`: all styles.
 - `app.js`: all frontend logic, in numbered sections:
   - `CONFIG`: constants, storage keys (`CONFIG.KEYS`), prices.
-  - `Store`: every note read/write, the pending queue, settings, `migrateNotes()`. `AudioStore`: recordings in IndexedDB. `Usage`: cost tracking. `Backup`: JSON backup/restore and `exportMarkdown()` for Obsidian.
+  - `NoteDB` + `Store`: notes in IndexedDB with an in-memory copy (`Store.load()` at boot, `getNotes`/`saveNote`/`setNotes`), the pending queue, settings, `migrateNotes()`. `AudioStore`: recordings in IndexedDB. `Usage`: cost tracking. `Backup`: JSON backup/restore and `exportMarkdown()` (optional Obsidian copy). `BackupReminder`: last-backup line and reminder banner.
   - `Auth`: passcode gate. `Capture`: mic and text input. `Queue`: sending notes to the Worker, retries.
   - `Search`: semantic search (embeddings cached in IndexedDB `nc_search`, `cosine()` ranking) with keyword fallback.
   - `Render`: notes list and cards. `Modal`: note detail/edit. `Settings`, `AudioPlayer`, `Diagnostics`, `UI`: their screens and helpers.
@@ -40,9 +40,10 @@ The app is the main home for notes. Obsidian markdown is a backup to export to a
 - `markdown-export.cjs`: Obsidian export, usage tracking, copy button.
 - `worker.mjs`: transcription quality and retries.
 - `worker-usage.mjs`: model allowlist, usage reporting, urgency.
+- `storage.cjs`: IndexedDB move and recovery cases, schema 4, backup reminder (uses a small fake IndexedDB).
 
 ## Architecture
-- Notes live in the browser's `localStorage` (`nc_notes`); recordings in IndexedDB (`nc_audio_store`); search vectors in a disposable IndexedDB cache (`nc_search`). There is no server-side copy of notes. One device only, by choice.
+- Notes live in IndexedDB (`nc_notes_db`, one record holding the whole array); `Store` keeps an in-memory copy and writes in the background (`setNotes` returns a promise; `Store.flush()` waits for all writes). The old `nc_notes` localStorage value is a frozen pre-move safety copy; `nc_notes_backend` marks the move. Without IndexedDB (tests), `Store` falls back to localStorage. Recordings are in IndexedDB (`nc_audio_store`); search vectors in a disposable IndexedDB cache (`nc_search`). There is no server-side copy of notes. One device only, by choice. The JSON full backup is the backup.
 - All note reads and writes go through `Store`, so storage can move to IndexedDB, or a cloud copy can be added later, without touching callers. Don't bypass it.
 - The Worker stores nothing.
 - Secrets live only in Cloudflare: `PASSCODE`, `GROQ_API_KEY`. Never put keys in the repo or the frontend.
@@ -54,6 +55,7 @@ node tests/frontend.cjs          # app state, backup/restore, queue
 node tests/markdown-export.cjs   # Obsidian export, usage tracking, copy button
 node tests/worker.mjs            # transcription quality + retries
 node tests/worker-usage.mjs      # model allowlist, usage reporting, urgency
+node tests/storage.cjs           # IndexedDB storage, recovery, backup reminder
 node --check app.js              # quick syntax check
 ```
 Check UI changes by hand on a phone.
@@ -61,14 +63,14 @@ Check UI changes by hand on a phone.
 ## Conventions
 - Note shape: `input` (original text, audio), `ai` (model output, never overwritten by user edits), `user` (overrides: `type_override`, `cleaned_text`, `fields`, tags), `sync`. Read through the `_getFinal*` helpers so user edits win.
 - `original_text` is set once at capture and never overwritten.
-- Schema changes need a migration in `migrateNotes()` and a `schema_version` bump in backups.
+- Schema changes need a migration in `migrateNotes()`, a bump of `CONFIG.DATA_VERSION`, and a bump of `CONFIG.BACKUP_SCHEMA` (backups). Currently 4. Every note has `user.links` (note ids) and `user.project` (string or null); `normalizeNote()` fills them.
+- When `app.js` or `styles.css` change, bump the `?v=` tag on both in `index.html`, or phones keep the cached old copy.
 - New settings go through `CONFIG.KEYS`; `clearAll` wipes every key listed there.
 - Groq list prices are in `CONFIG.PRICES` and are estimates. Re-check them before relying on the cost readout.
 
-## Obsidian export (`Backup.exportMarkdown`), current behaviour
+## Obsidian export (`Backup.exportMarkdown`), optional copy
 - One `.md` per note in a ZIP: frontmatter (id, type, status, urgent, due/when/where, tags, source, created, updated) + English text + `## Original`.
-- **Each note is exported once**, tracked by id in `nc_md_exported`, so unzipping never duplicates. After export Obsidian owns the note; later edits in the app do not flow back. "Export all again" exists but can duplicate.
-- After export the app copy gets `user.exported_at` (shown as "In Obsidian") and is archived, never deleted. It keeps the original text and lets us re-export if the file format improves. Archiving only happens on a note's first export.
+- Exporting changes nothing in the app (no archiving, no label). "Export new notes" skips ids already sent (`nc_md_exported`); "Export all again" can duplicate. The round trip (repeatable export + import) is on ice; see `PLAN.md`.
 - Held back until resolved: notes with an uncertain transcript (`transcription_review`; the audio only exists in the app), notes with an unanswered AI question (answer or dismiss it in the app; the status line says how many are urgent), and notes still processing when a Worker is configured.
 - Filenames are stable per note: `YYYY-MM-DD-slug-<id8>.md`. Renaming in Obsidian is fine; the `id` in frontmatter is the identity.
 - Planned replacement (repeatable export, simple import with conflict notes): see **Decisions** in `PLAN.md`.
@@ -79,6 +81,8 @@ A saved custom prompt rewrites `cleaned_text` only; type, tags, urgency and ques
 ## Things to be careful with
 - My own edits must never be overwritten by AI results (`user.*` wins over `ai.*`).
 - Notes exist only on one device. Anything that deletes, migrates or rewrites stored notes: warn me first and make sure a backup exists.
+- Pushing to `main` goes live on my phone the next time I open the app. Tell me before anything is pushed.
+- Never read or write the `nc_notes` localStorage key directly; go through `Store`.
 - Changing `worker.js` does nothing until the Worker is redeployed.
 
 ## Known limits

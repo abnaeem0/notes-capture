@@ -2,7 +2,7 @@
    NoteCapture — app.js
    All frontend logic. Sections:
      1. CONFIG          — easy-to-change constants
-     2. STORAGE         — read/write notes to localStorage
+     2. STORAGE         — read/write notes (IndexedDB, in-memory copy)
      3. AUTH            — passcode gate
      4. CAPTURE         — mic + text input
      5. QUEUE           — pending retry system
@@ -21,7 +21,11 @@
 const CONFIG = {
   // localStorage keys
   KEYS: {
-    NOTES:       'nc_notes',        // array of all note objects
+    NOTES:       'nc_notes',        // pre-IndexedDB notes; frozen as a safety copy after the move (see Store.load)
+    NOTES_BACKEND: 'nc_notes_backend', // 'indexeddb' once notes have moved
+    NOTES_REV:   'nc_notes_rev',    // changes on every save so other tabs reload
+    LAST_BACKUP: 'nc_last_backup',  // ISO time of the last full backup download
+    BACKUP_SNOOZE: 'nc_backup_snooze', // ISO time until which the backup reminder is hidden
     PASSCODE:    'nc_passcode',     // stored passcode string
     WORKER_URL:  'nc_worker_url',   // Cloudflare Worker endpoint
     PENDING:     'nc_pending',      // array of note IDs awaiting processing
@@ -48,6 +52,10 @@ const CONFIG = {
   },
 
   API_VERSION: 2,
+  DATA_VERSION: 4,        // note schema version (migrateNotes)
+  BACKUP_SCHEMA: 4,       // JSON backup schema_version written by Backup.export
+  BACKUP_REMIND_DAYS: 7,  // remind to back up after this many days…
+  BACKUP_REMIND_CHANGES: 20, // …or this many new/changed notes since the last backup
   DEFAULT_TRANSCRIPTION_PROMPT: '',
 
   // How often the retry queue runs (ms)
@@ -74,21 +82,148 @@ const CONFIG = {
 
 
 // ── 2. STORAGE ───────────────────────────────────────────────────
-// All persistence goes through these functions.
-// Swap localStorage for IndexedDB or a remote DB here later.
+// All note persistence goes through Store, so a cloud copy can be added later
+// without touching callers.
+//
+// Notes live in IndexedDB (database `nc_notes_db`, one record holding the whole
+// notes array as JSON, so every save is all-or-nothing like localStorage was).
+// Store keeps an in-memory copy (`raw`) so reads stay synchronous; writes update
+// the copy at once and reach IndexedDB in the background, in order.
+// The pre-move `nc_notes` localStorage value is never deleted by the move: it stays
+// as a frozen safety copy. Settings stay in localStorage.
+
+const NoteDB = {
+  dbPromise: null,
+  available() { return typeof indexedDB !== 'undefined'; },
+  open() {
+    if (!this.dbPromise) this.dbPromise = new Promise((resolve, reject) => {
+      const request = indexedDB.open('nc_notes_db', 1);
+      request.onupgradeneeded = () => request.result.createObjectStore('kv');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+      request.onblocked = () => reject(new Error('Close other NoteCapture tabs and reload.'));
+    }).catch(err => { this.dbPromise = null; throw err; });
+    return this.dbPromise;
+  },
+  async run(mode, action) {
+    const db = await this.open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('kv', mode);
+      let result;
+      const request = action(tx.objectStore('kv'));
+      request.onsuccess = () => { result = request.result; };
+      tx.oncomplete = () => resolve(result);   // resolves only once the write is committed
+      tx.onerror = () => reject(tx.error || new Error('Note storage failed.'));
+      tx.onabort = () => reject(tx.error || new Error('Note storage was interrupted (device storage may be full).'));
+    });
+  },
+  get(key) { return this.run('readonly', s => s.get(key)); },
+  put(key, value) { return this.run('readwrite', s => s.put(value, key)); },
+  clear() { return this.run('readwrite', s => s.clear()); },
+};
 
 const Store = {
-  /** Return all notes, newest first */
+  raw: null,            // JSON string of all notes: the in-memory copy
+  backend: 'local',     // 'indexeddb' after Store.load() succeeds
+  readOnly: false,      // true if IndexedDB was in use but could not be opened this time
+  rev: null,            // last revision this tab wrote or loaded
+  writeChain: Promise.resolve(),
+  writeError: null,
+  persisted: null,      // result of navigator.storage.persist(): true, false or null (unknown)
+
+  _raw() {
+    // Without IndexedDB, read localStorage fresh each time (as before), so tabs stay in step.
+    if (this.backend !== 'indexeddb' && !this.readOnly) return localStorage.getItem(CONFIG.KEYS.NOTES) || '[]';
+    if (this.raw === null) this.raw = localStorage.getItem(CONFIG.KEYS.NOTES) || '[]';
+    return this.raw;
+  },
+
+  /**
+   * Boot: open IndexedDB, moving notes there from localStorage the first time.
+   * Never throws; returns a short message when something needs the user's attention.
+   */
+  async load() {
+    const legacy = localStorage.getItem(CONFIG.KEYS.NOTES);
+    const moved = localStorage.getItem(CONFIG.KEYS.NOTES_BACKEND) === 'indexeddb';
+    if (!NoteDB.available()) { this.backend = 'local'; this.raw = null; return null; }
+    let warning = null;
+    try {
+      const stored = await NoteDB.get('notes');
+      if (typeof stored === 'string') {
+        JSON.parse(stored); // refuse a corrupt record rather than overwrite it
+        this.raw = stored;
+      } else {
+        // First run on this version (or storage was cleared): copy, then read back to verify.
+        const source = legacy ?? '[]';
+        JSON.parse(source);
+        await NoteDB.put('notes', source);
+        if (await NoteDB.get('notes') !== source) throw new Error('Could not verify the copied notes.');
+        this.raw = source;
+        if (moved) warning = 'Saved notes were missing from device storage, so the copy kept from the storage upgrade was loaded. Check recent notes and restore your latest backup if any are missing.';
+        localStorage.setItem(CONFIG.KEYS.NOTES_BACKEND, 'indexeddb');
+      }
+      this.backend = 'indexeddb';
+      this.rev = localStorage.getItem(CONFIG.KEYS.NOTES_REV);
+    } catch (err) {
+      this.raw = null;
+      if (moved) {
+        // Notes already live in IndexedDB; never write to the stale localStorage copy.
+        this.readOnly = true;
+        warning = `Could not open note storage (${err.message}). Showing the older copy; changes cannot be saved. Close other tabs and reload.`;
+      } else {
+        this.backend = 'local';
+        warning = null; // stay on localStorage this time; the move retries on the next start
+      }
+    }
+    try { this.persisted = navigator.storage?.persist ? await navigator.storage.persist() : null; } catch { this.persisted = null; }
+    return warning;
+  },
+
+  /** Another tab saved: reload the in-memory copy. */
+  async reloadFromDisk() {
+    if (this.backend !== 'indexeddb') { this.raw = null; return; }
+    const stored = await NoteDB.get('notes');
+    if (typeof stored === 'string') { this.raw = stored; this.rev = localStorage.getItem(CONFIG.KEYS.NOTES_REV); }
+  },
+
+  /** Return all notes, newest first (a fresh copy each call; edit it, then save). */
   getNotes() {
     try {
-      return JSON.parse(localStorage.getItem(CONFIG.KEYS.NOTES) || '[]');
+      return JSON.parse(this._raw());
     } catch { return []; }
   },
 
-  /** Persist the full notes array */
+  /**
+   * Persist the full notes array. The in-memory copy updates immediately;
+   * the returned promise resolves once the notes are safely on the device.
+   * Callers that must know (import) await it; others can ignore it.
+   */
   setNotes(notes) {
-    localStorage.setItem(CONFIG.KEYS.NOTES, JSON.stringify(notes));
+    if (this.readOnly) throw new Error('Note storage could not be opened; reload the app before making changes.');
+    const raw = JSON.stringify(notes);
+    if (this.backend !== 'indexeddb') {
+      localStorage.setItem(CONFIG.KEYS.NOTES, raw); // throws on quota, before the copy changes
+      this.raw = raw;
+      return Promise.resolve();
+    }
+    this.raw = raw;
+    // Each queued write saves the newest copy, so a burst of saves collapses safely.
+    const write = this.writeChain.then(() => NoteDB.put('notes', this.raw)).then(() => {
+      this.writeError = null;
+      this.rev = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      try { localStorage.setItem(CONFIG.KEYS.NOTES_REV, this.rev); } catch {}
+    }, err => {
+      this.writeError = err;
+      UI.showToast?.(`Could not save notes on this device: ${err.message}. Make a backup now.`, 'error');
+      throw err;
+    });
+    this.writeChain = write.catch(() => {});
+    write.catch(() => {}); // the toast reports it; awaiting callers still see the error
+    return write;
   },
+
+  /** Wait for every queued note write to finish. */
+  flush() { return this.writeChain; },
 
   /** Get a single note by id */
   getNote(id) {
@@ -149,7 +284,9 @@ const Store = {
   async clearAll() {
     await AudioStore.clear();
     await Search.clear();
+    if (this.backend === 'indexeddb' || this.readOnly) { await this.flush(); await NoteDB.clear(); }
     Object.values(CONFIG.KEYS).forEach(k => localStorage.removeItem(k));
+    this.raw = null;
   },
 
   /** Run versioned, non-destructive note schema migrations on boot */
@@ -203,7 +340,12 @@ const Store = {
       if (localStorage.getItem(CONFIG.KEYS.TRANSCRIPTION_PROMPT) === old) this.setTranscriptionPrompt('');
       localStorage.setItem(CONFIG.KEYS.DATA_VERSION, '3');
     }
-
+    // Version 4 — the app is the main home: notes archived by the Obsidian export come back,
+    // the "In Obsidian" label goes, and every note gets `user.links` and `user.project`.
+    if (currentVersion < 4) {
+      this.setNotes(this.getNotes().map(normalizeNote));
+      localStorage.setItem(CONFIG.KEYS.DATA_VERSION, '4');
+    }
   },
 };
 
@@ -226,6 +368,14 @@ function normalizeNote(note) {
   if (note.ai.clarification_dismissed) note.user.dismissed_question_id ??= note.ai.clarification_question;
   note.user.archived_at ??= null;
   note.user.completed_at ??= null;
+  // Links to other notes (ids) and a single project name; used by related-note suggestions.
+  note.user.links = Array.isArray(note.user.links) ? note.user.links.filter(id => typeof id === 'string' && id && id !== note.id) : [];
+  note.user.project = typeof note.user.project === 'string' && note.user.project.trim() ? note.user.project.trim() : null;
+  // Undo the old "Obsidian owns it" step: un-archive only what the export archived.
+  if (note.user.exported_at) {
+    if (note.user.archived_at === note.user.exported_at) note.user.archived_at = null;
+    delete note.user.exported_at;
+  }
   return note;
 }
 
@@ -299,8 +449,8 @@ function downloadBlob(blob, filename) {
 }
 
 function validateBackup(data) {
-  if (!data || !Array.isArray(data.notes) || !Number.isInteger(data.schema_version) || data.schema_version < 1 || data.schema_version > 3)
-    throw new Error('Unsupported backup. Choose a NoteCapture JSON backup (schema 1–3).');
+  if (!data || !Array.isArray(data.notes) || !Number.isInteger(data.schema_version) || data.schema_version < 1 || data.schema_version > CONFIG.BACKUP_SCHEMA)
+    throw new Error(`Unsupported backup. Choose a NoteCapture JSON backup (schema 1–${CONFIG.BACKUP_SCHEMA}).`);
   if (data.format && data.format !== 'notecapture-backup') throw new Error('This is not a NoteCapture backup.');
   if (data.audio != null && (!Array.isArray(data.audio))) throw new Error('Invalid audio list.');
   const ids = new Set();
@@ -318,6 +468,8 @@ function validateBackup(data) {
       if (group.fields != null && (!record(group.fields) || Object.values(group.fields).some(v => v != null && !['string', 'number', 'boolean'].includes(typeof v)))) throw new Error('Invalid fields in backup.');
     }
     if ((n.context || []).some(e => !record(e) || typeof e.text !== 'string')) throw new Error('Invalid history in backup.');
+    if (n.user?.links != null && (!Array.isArray(n.user.links) || n.user.links.some(v => typeof v !== 'string'))) throw new Error('Invalid links in backup.');
+    if (n.user?.project != null && typeof n.user.project !== 'string') throw new Error('Invalid project in backup.');
     if (n.input.audio_blob_key && !n.input.audio_blob_key.startsWith('nc_audio_')) throw new Error('Invalid recording key.');
     if (n.ai?.type && !CONFIG.TYPES.some(t => t.value === n.ai.type)) throw new Error('Unknown note type.');
     if (n.user?.type_override && !CONFIG.TYPES.some(t => t.value === n.user.type_override)) throw new Error('Unknown note type override.');
@@ -468,8 +620,9 @@ const Backup = {
         if (!blob) throw new Error('A recording is missing. Restore it or remove its recording link before making a full backup.');
         audio.push({ note_id: n.id, mime_type: blob.type || 'audio/webm', base64: await blobToBase64(blob) });
       }
-      const data = { format: 'notecapture-backup', schema_version: 3, exported_at: new Date().toISOString(), notes, audio };
+      const data = { format: 'notecapture-backup', schema_version: CONFIG.BACKUP_SCHEMA, exported_at: new Date().toISOString(), notes, audio };
       downloadBlob(new Blob([JSON.stringify(data)], { type: 'application/json' }), `notecapture-backup-${new Date().toISOString().slice(0, 10)}.json`);
+      BackupReminder.recordBackup(data.exported_at);
       this.status(`Backup download started: ${notes.length} notes and ${audio.length} recordings. Keep the downloaded file safe.`);
     } catch (err) { this.status(`Export failed: ${err.message}`); }
     finally { this.unlock(); }
@@ -486,7 +639,7 @@ const Backup = {
     const ready = withText.filter(n => !held.includes(n) && !asking.includes(n) && !waiting.includes(n));
     return { ready, held: held.length, asking: asking.length, askingUrgent: asking.filter(n => n.ai?.urgency === 'urgent').length, waiting: waiting.length };
   },
-  /** Obsidian export: one .md per note in a ZIP. Each note is sent once (tracked by id) so re-exports never duplicate. Audio is not included. */
+  /** Obsidian export (optional copy): one .md per note in a ZIP. "New notes" skips ids already sent. Audio is not included. */
   exportMarkdown(all = false) {
     if (this.busy) return;
     try {
@@ -501,21 +654,11 @@ const Backup = {
       const files = notes.map(n => ({ name: noteFilename(n), content: noteToMarkdown(n) }));
       downloadBlob(buildZip(files), `notecapture-obsidian-${new Date().toISOString().slice(0, 10)}.zip`);
       const at = new Date().toISOString();
-      // Obsidian owns a note after export, so the app copy is labelled and archived (never deleted:
-      // it keeps the original text and can be re-exported if the file format improves).
-      let archived = 0;
-      notes.forEach(n => {
-        const first = !sent[n.id];
-        sent[n.id] = at;
-        const fresh = Store.getNote(n.id);
-        if (!fresh) return;
-        fresh.user.exported_at = at;
-        if (first && !fresh.user.archived_at) { fresh.user.archived_at = at; archived++; }
-        Store.saveNote(fresh);
-      });
+      // The app is the main home for notes: exporting is a copy and changes nothing in the app.
+      // Ids are remembered only so "Export new notes" skips notes already sent.
+      notes.forEach(n => { sent[n.id] = at; });
       localStorage.setItem(CONFIG.KEYS.MD_EXPORTED, JSON.stringify(sent));
-      Render.renderNotesList?.();
-      this.status(`Markdown download started: ${files.length} ${all ? '' : 'new '}note${files.length === 1 ? '' : 's'}.${skipped ? ' ' + skipped + '.' : ''} Unzip into your Obsidian vault's Inbox folder.${archived ? ` ${archived} moved to Archived in the app (still searchable, labelled "In Obsidian").` : ''} Obsidian owns these notes now; later edits in the app are not re-exported unless you choose "Export all again".`);
+      this.status(`Markdown download started: ${files.length} ${all ? '' : 'new '}note${files.length === 1 ? '' : 's'}.${skipped ? ' ' + skipped + '.' : ''} Unzip into your Obsidian vault's Inbox folder. The notes stay in the app as they are.`);
     } catch (err) { this.status(`Markdown export failed: ${err.message}`); }
   },
   async import(file) {
@@ -526,7 +669,8 @@ const Backup = {
       this.lock(); this.status('Checking backup…');
       const data = JSON.parse(await file.text());
       const incoming = validateBackup(data);
-      const before = localStorage.getItem(CONFIG.KEYS.NOTES);
+      await Store.flush();
+      const before = Store._raw();
       const current = Store.getNotes();
       const map = new Map(current.map(n => [n.id, n]));
       const audio = new Map((data.audio || []).map(a => [a.note_id, a]));
@@ -555,11 +699,16 @@ const Backup = {
         map.set(n.id, n);
         if (existing) updated++; else added++;
       }
-      if (localStorage.getItem(CONFIG.KEYS.NOTES) !== before) throw new Error('Notes changed in another tab. Retry import.');
+      if (Store._raw() !== before) throw new Error('Notes changed in another tab. Retry import.');
       const merged = [...map.values()].sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));
-      Store.setNotes(merged); // one atomic localStorage write, after audio is durable
+      try {
+        await Store.setNotes(merged); // one all-or-nothing write, after audio is durable
+      } catch (err) {
+        Store.raw = before; // the write failed, so the device still holds the old notes
+        throw err;
+      }
       committed = true;
-      localStorage.setItem(CONFIG.KEYS.DATA_VERSION, '3');
+      localStorage.setItem(CONFIG.KEYS.DATA_VERSION, String(CONFIG.DATA_VERSION));
       localStorage.setItem(CONFIG.KEYS.PENDING, JSON.stringify(merged.filter(n => n.sync.pending && n.status !== 'transcription_review').map(n => n.id)));
       // Only delete old recordings after the merged notes commit.
       const keys = new Set(merged.map(n => n.input.audio_blob_key).filter(Boolean));
@@ -573,6 +722,52 @@ const Backup = {
   },
 };
 
+/* ── Backup reminder ─────────────────────────────────────────────────────────
+   Notes exist only on this device, so the app nudges for a full backup after
+   CONFIG.BACKUP_REMIND_DAYS days or CONFIG.BACKUP_REMIND_CHANGES new/changed notes. */
+const BackupReminder = {
+  recordBackup(at = new Date().toISOString()) {
+    localStorage.setItem(CONFIG.KEYS.LAST_BACKUP, at);
+    localStorage.removeItem(CONFIG.KEYS.BACKUP_SNOOZE);
+    this.render();
+  },
+  state(now = Date.now()) {
+    const last = localStorage.getItem(CONFIG.KEYS.LAST_BACKUP);
+    const lastMs = Date.parse(last);
+    const notes = Store.getNotes();
+    const changed = notes.filter(n => !Number.isFinite(lastMs) || (Date.parse(n.updated_at) || 0) > lastMs).length;
+    const days = Number.isFinite(lastMs) ? (now - lastMs) / 86_400_000 : Infinity;
+    const due = notes.length > 0 && (days >= CONFIG.BACKUP_REMIND_DAYS || changed >= CONFIG.BACKUP_REMIND_CHANGES);
+    const snoozed = (Date.parse(localStorage.getItem(CONFIG.KEYS.BACKUP_SNOOZE)) || 0) > now;
+    return { last: Number.isFinite(lastMs) ? last : null, changed, days, due, show: due && !snoozed };
+  },
+  summary(st = this.state()) {
+    if (!st.last) return 'No backup made on this device yet (backups made before this update are not counted).';
+    return `Last backup ${_relativeTime(st.last)} · ${st.changed} note${st.changed === 1 ? '' : 's'} new or changed since.`;
+  },
+  snooze() {
+    localStorage.setItem(CONFIG.KEYS.BACKUP_SNOOZE, new Date(Date.now() + 86_400_000).toISOString());
+    this.render();
+  },
+  render() {
+    const st = this.state();
+    const banner = document.getElementById('backup-banner');
+    if (banner) {
+      banner.classList.toggle('hidden', !st.show);
+      const text = document.getElementById('backup-banner-text');
+      if (text) text.textContent = st.last
+        ? `Time for a backup: last one ${_relativeTime(st.last)}, ${st.changed} note${st.changed === 1 ? '' : 's'} changed since. Your notes exist only on this device.`
+        : 'Time for a backup. Your notes exist only on this device.';
+    }
+    const line = document.getElementById('backup-last');
+    if (line) line.textContent = this.summary(st);
+    const storage = document.getElementById('storage-status');
+    if (storage) storage.textContent = Store.readOnly ? 'Storage: could not be opened. Reload the app.'
+      : Store.backend !== 'indexeddb' ? 'Storage: browser local storage (older, smaller). The upgrade retries next time the app starts.'
+      : Store.persisted === true ? 'Storage: on this device, protected from automatic clean-up.'
+      : 'Storage: on this device. The browser may clear it if space runs low, so back up regularly.';
+  },
+};
 
 // ── 3. AUTH ──────────────────────────────────────────────────────
 // Passcode gate. Passcode is sent with every Worker request.
@@ -1368,6 +1563,7 @@ const Render = {
   archiveView: 'active',
 
   renderNotesList() {
+    BackupReminder.render();
     const list = document.getElementById('notes-list');
     let notes = Store.getNotes();
 
@@ -1412,7 +1608,6 @@ function _noteCardHTML(note, matchLabel = '') {
       </div>
       <p class="note-summary">${escHtml(summary)}</p>
       <p class="note-time">${time}</p>
-      ${note.user?.exported_at ? '<p class="search-match-label">In Obsidian</p>' : ''}
       ${note.user?.archived_at ? '<p class="search-match-label">Archived</p>' : ''}
       ${note.user?.completed_at ? '<p class="search-match-label">Completed</p>' : ''}
       ${note.status === 'transcription_review' ? '<p class="note-pending-label">Check transcript · audio retained</p>' : ''}
@@ -2019,6 +2214,7 @@ const Settings = {
     eye.setAttribute('aria-pressed', 'false'); eye.setAttribute('aria-label', 'Show passcode'); eye.title = 'Show passcode';
     document.getElementById('setting-worker-url').value = Store.getWorkerUrl();
     document.getElementById('setting-search-status').textContent = Search.message || 'Search index updates automatically when online.';
+    BackupReminder.render();
     this.loadPrompt();
     document.getElementById('setting-transcription-prompt').value = Store.getTranscriptionPrompt();
     this.loadAiSettings();
@@ -2138,12 +2334,12 @@ const Settings = {
 const UI = {
   _toastTimer: null,
 
-  showToast(msg, type = '') {
+  showToast(msg, type = '', ms = type === 'error' && msg.length > 80 ? 10000 : 2800) {
     const el = document.getElementById('toast');
     el.textContent = msg;
     el.className = `toast${type ? ` ${type}` : ''}`;
     clearTimeout(this._toastTimer);
-    this._toastTimer = setTimeout(() => el.classList.add('hidden'), 2800);
+    this._toastTimer = setTimeout(() => el.classList.add('hidden'), ms);
   },
 
   setMicState(state) {
@@ -2198,11 +2394,20 @@ function refreshCaptureType() {
   });
 }
 
-function init() {
-  Store.migrateNotes();
-  // Rebuild the disposable queue after imports or an interrupted queue write.
-  localStorage.setItem(CONFIG.KEYS.PENDING, JSON.stringify(Store.getNotes().filter(n => n.sync?.pending && n.status !== 'transcription_review').map(n => n.id)));
-  AudioStore.migrateLegacy().catch(() => UI.showToast('Old recordings are still available; audio migration will retry next time.', 'error'));
+async function init() {
+  const storageWarning = await Store.load();
+  if (!Store.readOnly) {
+    Store.migrateNotes();
+    // Rebuild the disposable queue after imports or an interrupted queue write.
+    localStorage.setItem(CONFIG.KEYS.PENDING, JSON.stringify(Store.getNotes().filter(n => n.sync?.pending && n.status !== 'transcription_review').map(n => n.id)));
+    AudioStore.migrateLegacy().catch(() => UI.showToast('Old recordings are still available; audio migration will retry next time.', 'error'));
+  }
+  if (storageWarning) UI.showToast(storageWarning, 'error');
+  // Another tab saved notes: reload this tab's copy so it never saves over them.
+  window.addEventListener('storage', e => {
+    if (e.key !== CONFIG.KEYS.NOTES_REV || !e.newValue || e.newValue === Store.rev) return;
+    Store.reloadFromDisk().then(() => { Render.renderNotesList(); BackupReminder.render(); }).catch(() => {});
+  });
 
   // ── Passcode gate
   if (Auth.isUnlocked()) {
@@ -2320,6 +2525,11 @@ function init() {
   document.getElementById('modal-audio-retry').addEventListener('click', () => Modal.retryAudio());
   document.getElementById('modal-audio-delete').addEventListener('click', () => Modal.removeAudio());
   document.getElementById('setting-export').addEventListener('click', () => Backup.export());
+  document.getElementById('backup-banner-now')?.addEventListener('click', async () => {
+    await Backup.export();
+    UI.showToast(document.getElementById('backup-status').textContent, 'ok', 6000);
+  });
+  document.getElementById('backup-banner-later')?.addEventListener('click', () => BackupReminder.snooze());
   document.getElementById('setting-export-md').addEventListener('click', () => Backup.exportMarkdown());
   document.getElementById('setting-import').addEventListener('change', e => Backup.import(e.target.files[0]).finally(() => { e.target.value = ''; }));
 
@@ -2424,6 +2634,7 @@ function init() {
 
 /** Called once auth passes — start queues, update badges */
 function afterUnlock() {
+  BackupReminder.render();
   UI.updatePendingBadge();
   Queue.drainQueue();
   Queue.startInterval();
@@ -2456,4 +2667,4 @@ function _relativeTime(iso) {
 }
 
 // ── BOOT ─────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', init);
+document.addEventListener('DOMContentLoaded', () => init().catch(err => { console.error(err); UI.showToast(`The app could not start properly: ${err.message}. Reload; your notes are untouched.`, 'error', 15000); }));
