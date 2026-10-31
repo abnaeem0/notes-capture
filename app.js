@@ -610,6 +610,17 @@ const Backup = {
   },
   unlock() { this.busy = false; document.querySelectorAll('.screen').forEach(el => { el.inert = false; }); },
   status(text) { document.getElementById('backup-status').textContent = text; },
+  /** Visible restore progress: file name, current step, spinner. state: 'busy' | 'done' | 'failed'. */
+  progress(step, state = 'busy', file = null) {
+    const box = document.getElementById('backup-progress');
+    if (!box) return;
+    if (file) document.getElementById('backup-progress-file').textContent = `${file.name} (${formatBytes(file.size)})`;
+    document.getElementById('backup-progress-step').textContent = step;
+    box.classList.remove('hidden', 'done', 'failed');
+    if (state !== 'busy') box.classList.add(state);
+    const btn = document.getElementById('setting-import-btn');
+    if (btn) btn.disabled = state === 'busy';
+  },
   async export() {
     if (this.busy) return;
     try {
@@ -663,19 +674,34 @@ const Backup = {
     } catch (err) { this.status(`Markdown export failed: ${err.message}`); }
   },
   async import(file) {
-    if (!file || this.busy) return;
+    if (!file) return;
+    if (this.busy) { UI.showToast('A backup or restore is already running.'); return; }
     const staged = [];
     let committed = false;
+    // Wait until the browser has drawn the progress box (frame, then a task after the paint).
+    const paint = () => new Promise(r => {
+      const after = () => { if (typeof MessageChannel === 'function') { const ch = new MessageChannel(); ch.port1.onmessage = () => r(); ch.port2.postMessage(0); } else r(); };
+      typeof requestAnimationFrame === 'function' ? requestAnimationFrame(after) : after();
+    });
     try {
-      this.lock(); this.status('Checking backup…');
-      const data = JSON.parse(await file.text());
+      this.progress('Reading file…', 'busy', file); this.status('');
+      document.getElementById('backup-progress')?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+      UI.showToast('Restoring backup…');
+      this.lock();
+      await paint(); // let the progress box show before the slow read and parse
+      const text = await file.text();
+      this.progress('Checking backup…'); await paint();
+      let data;
+      try { data = JSON.parse(text); } catch { throw new Error('This file is not a NoteCapture backup (not valid JSON).'); }
       const incoming = validateBackup(data);
+      this.progress(`Found ${incoming.length} note${incoming.length === 1 ? '' : 's'}. Merging…`); await paint();
       await Store.flush();
       const before = Store._raw();
       const current = Store.getNotes();
       const map = new Map(current.map(n => [n.id, n]));
       const audio = new Map((data.audio || []).map(a => [a.note_id, a]));
-      let added = 0, updated = 0, kept = 0, missing = 0;
+      let added = 0, updated = 0, kept = 0, missing = 0, restored = 0;
+      const totalAudio = incoming.filter(n => n.input.audio_blob_key && audio.has(n.id)).length;
       const timestamp = n => { const t = Date.parse(n.updated_at); return Number.isFinite(t) ? t : 0; };
       for (const n of incoming) {
         const existing = map.get(n.id);
@@ -684,6 +710,7 @@ const Backup = {
           const a = audio.get(n.id);
           if (a) {
             const key = `nc_audio_import_${crypto.randomUUID()}`;
+            this.progress(`Restoring recordings ${++restored} of ${totalAudio}…`); await paint();
             staged.push(key);
             await AudioStore.put(key, base64Blob(a.base64, a.mime_type));
             n.input.audio_blob_key = key;
@@ -702,6 +729,7 @@ const Backup = {
       }
       if (Store._raw() !== before) throw new Error('Notes changed in another tab. Retry import.');
       const merged = [...map.values()].sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));
+      this.progress('Saving notes…'); await paint();
       try {
         await Store.setNotes(merged); // one all-or-nothing write, after audio is durable
       } catch (err) {
@@ -715,11 +743,17 @@ const Backup = {
       const keys = new Set(merged.map(n => n.input.audio_blob_key).filter(Boolean));
       for (const n of current) if (n.input.audio_blob_key && !keys.has(n.input.audio_blob_key)) await AudioStore.remove(n.input.audio_blob_key).catch(() => {});
       Search.schedule(); Render.renderNotesList(); UI.updatePendingBadge();
-      this.status(`Imported: ${added} added, ${updated} updated, ${kept} existing copies kept.${missing ? ` ${missing} recording(s) were absent from this backup.` : ''}`);
+      const summary = `${added} added, ${updated} updated, ${kept} already up to date.`;
+      this.progress(`Done: ${summary}`, 'done');
+      this.status(`Imported: ${summary}${missing ? ` ${missing} recording(s) were absent from this backup.` : ''}`);
+      UI.showToast(`Backup restored: ${added} added, ${updated} updated`, 'ok');
     } catch (err) {
       if (!committed) for (const key of staged) await AudioStore.remove(key).catch(() => {});
-      this.status(`${committed ? 'Notes imported, but queue refresh failed; reload the app' : 'Import failed; existing notes were kept'}: ${err.message}`);
-    } finally { this.unlock(); }
+      const msg = `${committed ? 'Notes imported, but queue refresh failed; reload the app' : 'Restore failed; your existing notes were kept'}: ${err.message}`;
+      this.progress(msg, 'failed');
+      this.status('');
+      UI.showToast(committed ? 'Restored, but reload the app' : 'Restore failed', 'error');
+    } finally { this.unlock(); const btn = document.getElementById('setting-import-btn'); if (btn) btn.disabled = false; }
   },
 };
 
@@ -1313,6 +1347,11 @@ function _historyTime(iso) {
 }
 
 /** Convert a Blob to a base64 data URL string */
+function formatBytes(n) {
+  if (!Number.isFinite(n)) return '';
+  return n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+}
+
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -2824,6 +2863,7 @@ async function init() {
   });
   document.getElementById('backup-banner-later')?.addEventListener('click', () => BackupReminder.snooze());
   document.getElementById('setting-export-md').addEventListener('click', () => Backup.exportMarkdown());
+  document.getElementById('setting-import-btn')?.addEventListener('click', () => document.getElementById('setting-import').click());
   document.getElementById('setting-import').addEventListener('change', e => Backup.import(e.target.files[0]).finally(() => { e.target.value = ''; }));
 
   document.getElementById('modal-type').addEventListener('change', e => {

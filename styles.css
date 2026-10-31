@@ -1340,7 +1340,20 @@ summary { color: var(--text-primary); cursor: pointer; padding: 12px 0; }
 .archive-controls label { display: flex; gap: 6px; align-items: center; min-height: 44px; }
 .archive-controls select, #modal-audio-language { font: inherit; padding: 8px; border: 1px solid #888; border-radius: 6px; background: var(--bg-raised); color: var(--text-primary); color-scheme: dark; }
 .modal-actions { flex-wrap: wrap; }
-.backup-file-label { display: block; margin: 16px 0 8px; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; opacity: 0; }
+.backup-progress { display: flex; gap: 12px; align-items: center; margin: 12px 0 4px; padding: 12px 14px; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--accent-dim); }
+.backup-progress.hidden { display: none; }
+.backup-progress.done { border-color: var(--status-ok); background: transparent; }
+.backup-progress.failed { border-color: var(--status-error); background: transparent; }
+.backup-progress.done .backup-spinner, .backup-progress.failed .backup-spinner { animation: none; border-color: currentColor; }
+.backup-progress.done .backup-spinner { color: var(--status-ok); }
+.backup-progress.failed .backup-spinner { color: var(--status-error); }
+.backup-spinner { width: 20px; height: 20px; flex-shrink: 0; border-radius: 50%; border: 3px solid var(--border); border-top-color: var(--accent); animation: backup-spin 0.8s linear infinite; }
+@keyframes backup-spin { to { transform: rotate(360deg); } }
+.backup-progress-text { min-width: 0; }
+.backup-progress-file { margin: 0; font-size: 0.85rem; font-weight: 700; color: var(--text-primary); overflow-wrap: anywhere; }
+.backup-progress-step { margin: 2px 0 0; font-size: 0.8rem; color: var(--text-secondary); }
+#setting-import-btn:disabled { opacity: 0.6; }
 #modal-audio-status { color: #a15500; }
 
 .archive-controls { gap: 10px 16px; color: var(--text-secondary); }

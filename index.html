@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>NoteCapture</title>
-  <link rel="stylesheet" href="styles.css?v=related-1" />
+  <link rel="stylesheet" href="styles.css?v=restore-1" />
 </head>
 <body>
 
@@ -415,8 +415,15 @@
         <button id="setting-export" class="settings-btn">Export full backup</button>
         <button id="setting-export-md" class="settings-btn">Export new notes to Obsidian (.zip, optional copy)</button>
         <button id="setting-export-md-all" class="settings-btn">Export all again (may duplicate)</button>
-        <label class="backup-file-label" for="setting-import">Import backup (.json)</label>
-        <input id="setting-import" class="settings-input" type="file" accept=".json,application/json" />
+        <button id="setting-import-btn" class="settings-btn" type="button">Restore from backup (.json)</button>
+        <input id="setting-import" class="visually-hidden" type="file" accept=".json,application/json" tabindex="-1" aria-hidden="true" />
+        <div id="backup-progress" class="backup-progress hidden" role="status" aria-live="polite">
+          <span class="backup-spinner" aria-hidden="true"></span>
+          <div class="backup-progress-text">
+            <p id="backup-progress-file" class="backup-progress-file"></p>
+            <p id="backup-progress-step" class="backup-progress-step"></p>
+          </div>
+        </div>
         <p id="backup-status" class="settings-hint" role="status" aria-live="polite"></p>
       </section>
 
@@ -463,6 +470,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=related-1"></script>
+  <script src="app.js?v=restore-1"></script>
 </body>
 </html>
