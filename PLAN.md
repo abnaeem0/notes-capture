@@ -17,6 +17,12 @@ Everything that isn't instructions for Claude lives here: direction, decisions, 
 - **Links:** a link is stored as note ids in `user.links` and is never appended to the note text. The app shows links as chips on the note. On export they're written as `related: ["[[<filename>]]"]` in frontmatter, so they work in Obsidian; on import, filenames are mapped back to ids, with the frontmatter `id` as a fallback if a file was renamed.
 - **Project:** a single `user.project` field, not a tag. Exported as `project: "[[Project Name]]"` so Obsidian treats it as a link. The project list is built from existing notes' projects.
 - **Tags** stay as they are. "Copy tags" merges the related note's tags into this note's tags.
+- **Types and tasks (2026-11-01):**
+  - Three types: **Task** (old To-do, Reminder, Schedule: something has to happen), **Idea** (old Idea, Research: maybe, think later), **Note** (information to keep). Idea vs Note is the weakest split; if it blurs in use, drop to Task + Note with "idea" as a tag.
+  - Appointments stay Tasks (no separate Event type): they need a proper *when* and *where*, and "done" means it has happened.
+  - Task details: **who** (person it's for or involves), **assigned to** (me or someone else; someone else → Waiting), **when** (due date or appointment time, optional reminder), **where**, **status** (Open / Waiting / Done).
+  - **Urgent, important** and similar flags become tags (replacing the separate `ai.urgency` field). The AI suggests them; user edits always win.
+  - The AI fills the task details from the note ("Ask Ahmed to send the form by Friday" → assigned to Ahmed, Waiting, due Friday); the user can correct them.
 - **Export is repeatable.** Each export rewrites the same file per note (filenames already stable: `YYYY-MM-DD-slug-<id8>.md`). The "export once" tracking (`nc_md_exported`) and archive-after-export go away. At export, store a fingerprint of the file's contents in `sync.md_hash` and the time in `sync.md_exported_at`.
 - **Import rules (simple):**
   - File has an `id` that matches an app note:
@@ -29,8 +35,7 @@ Everything that isn't instructions for Claude lives here: direction, decisions, 
 ## Next
 - [ ] **Check the storage update on the phone** (after pushing): open the app, confirm all notes are there, make a backup from the banner, add a note, close and reopen.
 - [ ] **Check similar notes on the phone** (after pushing): add two or three notes on a topic you already have, check the "similar notes" line on Capture and the strip in the note, and note the % scores of good and bad matches so the cut-off can be tuned.
-- [ ] **Fewer types; urgent and important as tags.** Cut the six types (To-do, Reminder, Schedule, Idea, Research, Note) down to three; the plan so far says Note / Task / Idea, with date and reminder kept as details on the note. Make urgent, important and similar flags tags instead of separate fields (today urgency is its own `ai.urgency` field). Changes stored notes: needs a migration, a data version bump and a backup first. Also touches the Worker prompt, the filter tabs and the Obsidian export.
-- [ ] **Waiting / who.** `waiting` status and a `who` field for handed-off tasks.
+- [ ] **Three types and a better Task** (design under Decisions → Types and tasks). Changes stored notes: needs a migration (old types → new, `ai.urgency` → tags), a data version bump and a backup first. Also touches the Worker prompt, the filter tabs, the note sheet and the Obsidian export.
 - [ ] **Test the clarification prompt on the live model** with real notes and adjust `DEFAULT_PROCESSING_PROMPT` in `worker.js`:
   - "Court hearing next Tuesday" → urgent; ask the time and which court.
   - "Have to submit the form today" → urgent; ask which form / where if unclear.
@@ -51,6 +56,7 @@ Everything that isn't instructions for Claude lives here: direction, decisions, 
 - [ ] **Tone detection.** Tone and urgency are lost in transcription. Options: a one-tap "urgent" at capture; Whisper's per-segment signals; or a prosody check on the audio passed to the classifier as a short hint.
 
 ## Open questions
+- Task "assigned to": tasks I hand to other people, tasks others give me, or both?
 - Should "Link" also add the reverse link on the other note by default, or only via "Link both ways"? (Built as one-way for now.)
 - Similarity cut-off for related notes: set to 60% (`Related.MIN_SCORE`). Adjust once real notes show which scores are good matches.
 
