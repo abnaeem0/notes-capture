@@ -28,7 +28,8 @@ The app is the main home for notes. Obsidian markdown is a backup to export to a
   - `NoteDB` + `Store`: notes in IndexedDB with an in-memory copy (`Store.load()` at boot, `getNotes`/`saveNote`/`setNotes`), the pending queue, settings, `migrateNotes()`. `AudioStore`: recordings in IndexedDB. `Usage`: cost tracking. `Backup`: JSON backup/restore and `exportMarkdown()` (optional Obsidian copy). `BackupReminder`: last-backup line and reminder banner.
   - `Auth`: passcode gate. `Capture`: mic and text input. `Queue`: sending notes to the Worker, retries.
   - `Search`: semantic search (embeddings cached in IndexedDB `nc_search`, `cosine()` ranking) with keyword fallback.
-  - `Render`: notes list and cards. `Modal`: note detail/edit. `Settings`, `AudioPlayer`, `Diagnostics`, `UI`: their screens and helpers.
+  - `Related`: similar notes after processing, using `Search.records` vectors (`forNote(id)` → notes with scores; cut-off `MIN_SCORE`). Per-note state in `nc_related`. Actions: `link`, `unlink`, `setProject`, `copyTags`. `_getProjects()` lists project names.
+  - `Render`: notes list and cards (`projectFilter` / `showProject()` for the project view). `Modal`: note detail/edit, incl. project field, linked notes and the similar-notes strip (`_renderRelated`, `relatedAction`). `Settings`, `AudioPlayer`, `Diagnostics`, `UI`: their screens and helpers.
   - `_getFinal*` helpers: read a note's final values (user edits win over AI output).
 
 **Worker** (`worker/`)
@@ -41,6 +42,7 @@ The app is the main home for notes. Obsidian markdown is a backup to export to a
 - `worker.mjs`: transcription quality and retries.
 - `worker-usage.mjs`: model allowlist, usage reporting, urgency.
 - `storage.cjs`: IndexedDB move and recovery cases, schema 4, backup reminder (uses a small fake IndexedDB).
+- `related.cjs`: similar notes, links, projects, project view.
 
 ## Architecture
 - Notes live in IndexedDB (`nc_notes_db`, one record holding the whole array); `Store` keeps an in-memory copy and writes in the background (`setNotes` returns a promise; `Store.flush()` waits for all writes). The old `nc_notes` localStorage value is a frozen pre-move safety copy; `nc_notes_backend` marks the move. Without IndexedDB (tests), `Store` falls back to localStorage. Recordings are in IndexedDB (`nc_audio_store`); search vectors in a disposable IndexedDB cache (`nc_search`). There is no server-side copy of notes. One device only, by choice. The JSON full backup is the backup.
@@ -56,6 +58,7 @@ node tests/markdown-export.cjs   # Obsidian export, usage tracking, copy button
 node tests/worker.mjs            # transcription quality + retries
 node tests/worker-usage.mjs      # model allowlist, usage reporting, urgency
 node tests/storage.cjs           # IndexedDB storage, recovery, backup reminder
+node tests/related.cjs           # similar notes, links, projects
 node --check app.js              # quick syntax check
 ```
 Check UI changes by hand on a phone.

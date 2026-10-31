@@ -28,14 +28,7 @@ Everything that isn't instructions for Claude lives here: direction, decisions, 
 
 ## Next
 - [ ] **Check the storage update on the phone** (after pushing): open the app, confirm all notes are there, make a backup from the banner, add a note, close and reopen.
-- [ ] **Related notes after transcription.**
-  - When a note finishes processing, embed its cleaned text (one `bge-m3` call through the existing `/embeddings` route) and rank against the local `nc_search` index.
-  - Show the top 3 above a similarity cut-off (tune on real notes). Nothing shows if nothing is close.
-  - Each related note shows a title, a one-line snippet and two buttons: **Link** and **Use project** (only if it has one). A **⋯** opens more: **Copy tags**, **Open note**, **Link both ways**.
-  - Nothing is applied automatically. Dismissing the strip hides it for that note.
-  - Typed notes go through the same flow after cleaning; no live suggestions while typing for now.
-  - Matching sits behind one function ("related notes for this note, with scores"); vectors record which model made them; scores visible in Diagnostics so the cut-off can be tuned. This is the part most likely to be revisited.
-  - Add a simple project view (tap a project to see its notes).
+- [ ] **Check similar notes on the phone** (after pushing): add two or three notes on a topic you already have, check the "similar notes" line on Capture and the strip in the note, and note the % scores of good and bad matches so the cut-off can be tuned.
 - [ ] **Waiting / who / project.** `waiting` status and a `who` field for handed-off tasks. `project` as decided above. Collapse the six types toward Note / Task / Idea, with date and reminder as attributes.
 - [ ] **Test the clarification prompt on the live model** with real notes and adjust `DEFAULT_PROCESSING_PROMPT` in `worker.js`:
   - "Court hearing next Tuesday" → urgent; ask the time and which court.
@@ -57,13 +50,14 @@ Everything that isn't instructions for Claude lives here: direction, decisions, 
 - [ ] **Tone detection.** Tone and urgency are lost in transcription. Options: a one-tap "urgent" at capture; Whisper's per-segment signals; or a prosody check on the audio passed to the classifier as a short hint.
 
 ## Open questions
-- Should "Link" also add the reverse link on the other note by default, or only via "Link both ways"?
-- Similarity cut-off for related notes: start around 0.6 for `bge-m3` and adjust once there are real notes to test on.
+- Should "Link" also add the reverse link on the other note by default, or only via "Link both ways"? (Built as one-way for now.)
+- Similarity cut-off for related notes: set to 60% (`Related.MIN_SCORE`). Adjust once real notes show which scores are good matches.
 
 ## Known bugs
 - None recorded yet. Add them here as `- [ ] what happens — where — how to reproduce`.
 
 ## Done
+- [x] 2026-11-01: **Similar notes after processing.** When a note finishes processing, the app compares it with your other notes using the vectors the search index already makes (no extra AI call or cost) and shows up to 3 at 60% or more. Shown as a line on the Capture screen ("3 similar notes · Review"), a label on the note's card, and a "Similar notes" box in the note with **Link**, **Use project** and **⋯** (Copy tags, Open note, Link both ways). Nothing is applied by itself; **Hide** hides the box for that note. Also added: a Project field on the note (suggests existing projects), linked notes as chips (tap to open, × to remove), and a project view (tap **View** to list every note in that project). Scores show as "% similar" in the box instead of Diagnostics, so tuning happens on real notes. The show/hide state per note is kept in `nc_related` (not in the note), so no data migration. Tests: `tests/related.cjs`.
 - [x] 2026-11-01: **Sturdier storage.** Notes moved from localStorage (about 5 MB, can be wiped) to IndexedDB with a verified copy on first start; the old copy is kept. Added `user.links` and `user.project` to every note (data version 4, backup schema 4). Notes archived by the Obsidian export were restored to active and the "In Obsidian" label removed; the Obsidian export no longer archives. Settings shows storage status. Tests: `tests/storage.cjs`.
 - [x] 2026-11-01: **Backup reminder.** "Last backup" line in Settings and a banner on the Notes screen with one-tap backup. Why: notes exist on one device only.
 - [x] 2026-10-31: Merged `TODO.md` into this file and recorded the app-is-main direction and its decisions. `CLAUDE.md` now points here.

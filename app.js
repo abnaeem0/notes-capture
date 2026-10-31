@@ -39,6 +39,7 @@ const CONFIG = {
     USAGE:       'nc_usage',        // per-day Groq usage totals (this device only)
     MD_EXPORTED: 'nc_md_exported',  // note ids already sent to Obsidian: { id: isoDate }
     SKIP_CLASSIFY: 'nc_skip_classify', // '1' = custom prompt replaces the built-in one (no type/urgency/questions)
+    RELATED:     'nc_related',      // similar-notes state per note id: new / found / seen / dismissed
   },
 
   // Groq list prices in USD, checked 2026-10-30 against a third-party summary of Groq's pricing page.
@@ -1105,6 +1106,7 @@ const Queue = {
 
         Store.saveNote(note);
         Store.removePending(note.id);
+        Related.markNew(note.id); // look for similar notes once its search vector is ready
         UI.updatePendingBadge();
 
         // Refresh notes list if visible
@@ -1415,7 +1417,9 @@ const Search = {
   },
   notify() {
     document.querySelectorAll('#search-status, #setting-search-status').forEach(el => { el.textContent = this.message; });
+    Related.check();
     if (document.getElementById('screen-notes')?.classList.contains('active')) Render.renderNotesList();
+    if (Modal.currentId) Modal._renderRelated();
   },
   async refresh() {
     if (this.indexing) { this.rerun = true; return; }
@@ -1554,6 +1558,150 @@ const Search = {
   },
 };
 
+// ── RELATED NOTES ────────────────────────────────────────────────
+// After a note is processed, find close notes using the vectors the search
+// index already holds (no extra embedding call). Nothing is applied
+// automatically: the user picks Link / Use project / Copy tags.
+// Per-note suggestion state lives in localStorage (`nc_related`), not in the
+// note, so no schema change: { id: 'new' | 'found' | 'seen' | 'dismissed' }.
+//   new: processed, waiting for its vector; found: matches shown on the card
+//   and capture screen; seen: opened once; dismissed: strip hidden.
+const Related = {
+  MIN_SCORE: 0.60, // Starting cut-off for bge-m3; tune with real notes (scores show in the strip).
+  MAX: 3,
+  bannerId: null,
+
+  states() {
+    try { const s = JSON.parse(localStorage.getItem(CONFIG.KEYS.RELATED) || '{}'); return s && typeof s === 'object' ? s : {}; }
+    catch { return {}; }
+  },
+  state(id) { return this.states()[id] || null; },
+  setState(id, value) {
+    const s = this.states();
+    const ids = new Set(Store.getNotes().map(n => n.id));
+    for (const k of Object.keys(s)) if (!ids.has(k)) delete s[k]; // forget deleted notes
+    if (value) s[id] = value; else delete s[id];
+    try { localStorage.setItem(CONFIG.KEYS.RELATED, JSON.stringify(s)); } catch {}
+  },
+
+  /** A note finished processing: look for similar notes once its vector is ready. */
+  markNew(id) {
+    if (this.state(id) !== 'dismissed') this.setState(id, 'new');
+  },
+
+  /** Is the search vector for this note up to date with its text? */
+  ready(note) {
+    const rec = note && Search.records.get(note.id);
+    return !!rec && rec.source === Search.source(note);
+  },
+
+  /** Related notes for this note, with scores (best first). [] if it has no vector.
+   *  A vector a little behind an edit (e.g. tags just copied) is still used, so the
+   *  strip doesn't flicker; `fresh` requires it to match the current text. */
+  forNote(id, { min = this.MIN_SCORE, max = this.MAX, fresh = false } = {}) {
+    const notes = Store.getNotes();
+    const note = notes.find(n => n.id === id);
+    if (!note || !Search.records.has(id) || (fresh && !this.ready(note))) return [];
+    const mine = Search.records.get(id).vectors;
+    const linked = new Set(note.user?.links || []);
+    const results = [];
+    for (const other of notes) {
+      if (other.id === id || linked.has(other.id) || !Search.records.has(other.id)) continue;
+      let score = -1;
+      for (const a of mine) for (const b of Search.records.get(other.id).vectors) score = Math.max(score, Search.cosine(a, b));
+      if (score >= min) results.push({ note: other, score });
+    }
+    results.sort((a, b) => b.score - a.score || String(b.note.created_at).localeCompare(String(a.note.created_at)));
+    return results.slice(0, max);
+  },
+
+  /** Called whenever the search index changes: settle 'new' notes. */
+  check() {
+    const s = this.states();
+    let changed = false;
+    for (const [id, st] of Object.entries(s)) {
+      if (st !== 'new') continue;
+      const note = Store.getNote(id);
+      if (!note) continue;
+      if (!this.ready(note)) continue;
+      const found = this.forNote(id, { fresh: true }).length > 0;
+      this.setState(id, found ? 'found' : null);
+      if (found) this.bannerId = id;
+      changed = true;
+    }
+    if (changed || this.bannerId) this.renderBanner();
+    return changed;
+  },
+
+  /** Capture-screen line: "2 similar notes found · Review". */
+  renderBanner() {
+    const el = document.getElementById('related-banner');
+    if (!el) return;
+    const id = this.bannerId;
+    const note = id && Store.getNote(id);
+    const count = note && this.state(id) === 'found' ? this.forNote(id).length : 0;
+    if (!count) { this.bannerId = null; el.classList.add('hidden'); return; }
+    const title = _getFinalSummary(note) || _getFinalCleanedText(note);
+    document.getElementById('related-banner-text').textContent =
+      `${count} similar note${count === 1 ? '' : 's'} for “${_snippet(title, 60)}”`;
+    el.classList.remove('hidden');
+  },
+  hideBanner() { this.bannerId = null; this.renderBanner(); },
+
+  // ── Actions (all go through Store; nothing automatic) ──
+  link(id, otherId, bothWays = false) {
+    const note = Store.getNote(id), other = Store.getNote(otherId);
+    if (!note || !other || id === otherId) return;
+    if (!note.user.links.includes(otherId)) { note.user.links.push(otherId); Store.saveNote(note); }
+    if (bothWays && !other.user.links.includes(id)) { other.user.links.push(id); Store.saveNote(other); }
+  },
+  unlink(id, otherId) {
+    const note = Store.getNote(id);
+    if (!note) return;
+    note.user.links = note.user.links.filter(x => x !== otherId);
+    Store.saveNote(note);
+  },
+  setProject(id, project) {
+    const note = Store.getNote(id);
+    if (!note) return;
+    note.user.project = typeof project === 'string' && project.trim() ? project.trim() : null;
+    Store.saveNote(note);
+  },
+  /** Merge the other note's tags into this note's tags (user additions). */
+  copyTags(id, otherId) {
+    const note = Store.getNote(id), other = Store.getNote(otherId);
+    if (!note || !other) return 0;
+    const have = new Set(_getFinalTags(note).map(t => t.toLowerCase()));
+    const add = _getFinalTags(other).filter(t => !have.has(t.toLowerCase()));
+    if (!add.length) return 0;
+    const addKeys = new Set(add.map(t => t.toLowerCase()));
+    note.user.tags_added = [...(note.user.tags_added || []), ...add];
+    // A tag the user removed earlier comes back if they copy it in now.
+    note.user.tags_removed = (note.user.tags_removed || []).filter(t => !addKeys.has(String(t).trim().toLowerCase()));
+    Store.saveNote(note);
+    return add.length;
+  },
+};
+
+/** All project names in use, most used first. */
+function _getProjects() {
+  const counts = new Map();
+  Store.getNotes().forEach(n => {
+    const p = n.user?.project;
+    if (!p) return;
+    const key = p.toLowerCase();
+    const cur = counts.get(key) || { name: p, n: 0 };
+    cur.n++; counts.set(key, cur);
+  });
+  return [...counts.values()].sort((a, b) => b.n - a.n || a.name.localeCompare(b.name)).map(c => c.name);
+}
+
+/** One-line preview of a note's text. */
+function _snippet(text, len = 90) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  return s.length > len ? `${s.slice(0, len - 1).trimEnd()}…` : s;
+}
+
 // ── 6. RENDER ────────────────────────────────────────────────────
 // Builds the notes list DOM. Only touches #notes-list.
 
@@ -1561,13 +1709,30 @@ const Render = {
   currentFilter: 'all',
   currentSearch: '',
   archiveView: 'active',
+  projectFilter: null, // project name, or null for all notes
+
+  /** Show every note in one project (active and archived). */
+  showProject(name) {
+    this.projectFilter = name || null;
+    UI.showScreen('notes');
+  },
 
   renderNotesList() {
     BackupReminder.render();
     const list = document.getElementById('notes-list');
     let notes = Store.getNotes();
 
-    notes = visibleNotes(notes, this.archiveView, this.currentSearch, localStorage.getItem(CONFIG.KEYS.INCLUDE_ARCHIVED) !== 'false');
+    const bar = document.getElementById('project-bar');
+    if (bar) {
+      bar.classList.toggle('hidden', !this.projectFilter);
+      document.getElementById('project-bar-name').textContent = this.projectFilter || '';
+    }
+    if (this.projectFilter) {
+      const key = this.projectFilter.toLowerCase();
+      notes = notes.filter(n => (n.user?.project || '').toLowerCase() === key);
+    } else {
+      notes = visibleNotes(notes, this.archiveView, this.currentSearch, localStorage.getItem(CONFIG.KEYS.INCLUDE_ARCHIVED) !== 'false');
+    }
 
     // Apply type filter
     if (this.currentFilter !== 'all') {
@@ -1576,7 +1741,7 @@ const Render = {
 
     const matches = this.currentSearch ? Search.rank(notes, this.currentSearch) : notes.map(note => ({ note, label: '' }));
     if (!matches.length) {
-      list.innerHTML = `<p class="notes-empty">${this.currentSearch ? 'No matching notes' : 'no notes yet'}</p>`;
+      list.innerHTML = `<p class="notes-empty">${this.currentSearch ? 'No matching notes' : this.projectFilter ? 'No notes in this project' : 'no notes yet'}</p>`;
       return;
     }
     list.innerHTML = matches.map(({ note, label }) => _noteCardHTML(note, label)).join('');
@@ -1598,6 +1763,7 @@ function _noteCardHTML(note, matchLabel = '') {
 
   const needsCtx  = note.status === 'needs_context' && note.user?.dismissed_question_id !== _questionKey(note) ? 'needs-context' : '';
   const isPending = note.sync.pending ? 'pending' : '';
+  const similar   = Related.state(note.id) === 'found' ? Related.forNote(note.id).length : 0;
 
   return `
     <div class="note-card ${needsCtx} ${isPending}" data-id="${escHtml(note.id)}" data-type="${escHtml(type)}">
@@ -1611,6 +1777,8 @@ function _noteCardHTML(note, matchLabel = '') {
       ${note.user?.archived_at ? '<p class="search-match-label">Archived</p>' : ''}
       ${note.user?.completed_at ? '<p class="search-match-label">Completed</p>' : ''}
       ${note.status === 'transcription_review' ? '<p class="note-pending-label">Check transcript · audio retained</p>' : ''}
+      ${note.user?.project ? `<p class="note-project-label">◆ ${escHtml(note.user.project)}</p>` : ''}
+      ${similar ? `<p class="note-similar-label">${similar} similar note${similar === 1 ? '' : 's'} · tap to review</p>` : ''}
       ${matchLabel ? `<p class="search-match-label">${escHtml(matchLabel)}</p>` : ''}
       ${note.sync.pending ? `<p class="note-pending-label">⟳ pending sync</p>` : ''}
     </div>
@@ -1633,12 +1801,16 @@ const Modal = {
     this.close(fromBack);
   },
 
-  open(id) {
+  open(id, { replace = false } = {}) {
     const note = Store.getNote(id);
     if (!note) return;
     this.currentId = id;
-    this.previousFocus = document.activeElement;
-    history.pushState({ ncNote: id }, '');
+    if (!replace) this.previousFocus = document.activeElement;
+    // Opening a linked/similar note from inside the sheet swaps it in place,
+    // so Back still closes the sheet instead of racing a history.back().
+    if (replace) history.replaceState({ ncNote: id }, ''); else history.pushState({ ncNote: id }, '');
+    if (Related.state(id) === 'found') Related.setState(id, 'seen');
+    if (Related.bannerId === id) Related.hideBanner();
 
     const type = _getFinalType(note);
     const tags = _getFinalTags(note);
@@ -1647,6 +1819,9 @@ const Modal = {
     document.getElementById('modal-topic').value   = tags.join(', ');
     document.getElementById('modal-cleaned').value = _getFinalCleanedText(note);
     document.getElementById('modal-summary').value = _getFinalSummary(note);
+    this._renderProject(note);
+    this._renderLinks(note);
+    this._renderRelated(true);
 
     // New Stage 1 modal sections. Guard these so a cached older index.html
     // cannot prevent notes from opening while GitHub Pages updates.
@@ -1688,6 +1863,9 @@ const Modal = {
     document.getElementById('modal-topic').value = _getFinalTags(note).join(', ');
     document.getElementById('modal-cleaned').value = _getFinalCleanedText(note);
     document.getElementById('modal-summary').value = _getFinalSummary(note);
+    this._renderProject(note);
+    this._renderLinks(note);
+    this._renderRelated(true);
     this._renderFields(note);
     this._renderHistory(note);
     this._renderContextPanel(note);
@@ -1717,6 +1895,7 @@ const Modal = {
       tags: document.getElementById('modal-topic').value,
       cleaned: document.getElementById('modal-cleaned').value,
       summary: document.getElementById('modal-summary').value,
+      project: document.getElementById('modal-project')?.value ?? '',
       fields,
     });
   },
@@ -1760,6 +1939,8 @@ const Modal = {
       userFields[input.dataset.field] = input.value.trim();
     });
     note.user.fields = userFields;
+    const projectInput = document.getElementById('modal-project');
+    if (projectInput) note.user.project = projectInput.value.trim() || null;
 
     Store.saveNote(note);
     this.openSnapshot = this._formSnapshot();
@@ -1924,6 +2105,117 @@ const Modal = {
       wrap.classList.add('hidden');
     }
 
+  },
+
+  /** Open another note (linked or similar) in the same sheet. */
+  switchTo(id) {
+    if (id === this.currentId || !Store.getNote(id)) return;
+    if (this.hasUnsavedChanges() && !confirm('Discard unsaved changes?')) return;
+    AudioPlayer.hide();
+    this.open(id, { replace: true });
+  },
+
+  _renderProject(note) {
+    const input = document.getElementById('modal-project');
+    if (!input) return;
+    input.value = note.user?.project || '';
+    const list = document.getElementById('project-options');
+    if (list) list.innerHTML = _getProjects().map(p => `<option value="${escHtml(p)}"></option>`).join('');
+    document.getElementById('modal-project-view')?.classList.toggle('hidden', !note.user?.project);
+  },
+
+  _renderLinks(note) {
+    const wrap = document.getElementById('modal-links');
+    if (!wrap) return;
+    const linked = (note.user?.links || []).map(id => Store.getNote(id)).filter(Boolean);
+    wrap.classList.toggle('hidden', !linked.length);
+    document.getElementById('modal-links-list').innerHTML = linked.map(n => `
+      <span class="link-chip">
+        <button type="button" class="link-chip-open" data-open="${escHtml(n.id)}">${escHtml(_snippet(_getFinalSummary(n) || _getFinalCleanedText(n), 40))}</button>
+        <button type="button" class="link-chip-remove" data-unlink="${escHtml(n.id)}" aria-label="Remove link">×</button>
+      </span>`).join('');
+  },
+
+  /** Similar-notes strip. Skips re-rendering when nothing changed so an open ⋯ menu stays open. */
+  _renderRelated(force = false) {
+    const wrap = document.getElementById('modal-related');
+    const id = this.currentId;
+    if (!wrap || !id) return;
+    const note = Store.getNote(id);
+    if (!note) return;
+    const dismissed = Related.state(id) === 'dismissed';
+    const all = Related.forNote(id);
+    const matches = dismissed ? [] : all;
+    const waiting = !dismissed && Related.state(id) === 'new' && !Related.ready(note);
+    const html = matches.map(({ note: n, score }) => {
+      const title = _getFinalSummary(n) || _snippet(_getFinalCleanedText(n), 60) || '(no text)';
+      const body = _snippet(_getFinalCleanedText(n), 90);
+      const project = n.user?.project;
+      const sameProject = project && project.toLowerCase() === (note.user.project || '').toLowerCase();
+      return `
+        <div class="related-item" data-id="${escHtml(n.id)}">
+          <div class="related-text">
+            <p class="related-title">${escHtml(title)}</p>
+            ${body && body !== title ? `<p class="related-snippet">${escHtml(body)}</p>` : ''}
+            <p class="related-meta">${Math.round(score * 100)}% similar${project ? ` · ◆ ${escHtml(project)}` : ''}${n.user?.archived_at ? ' · archived' : ''}</p>
+          </div>
+          <div class="related-actions">
+            <button type="button" class="related-btn" data-act="link">Link</button>
+            ${project && !sameProject ? `<button type="button" class="related-btn" data-act="project">Use project</button>` : ''}
+            <details class="related-more">
+              <summary class="related-btn" aria-label="More options">⋯</summary>
+              <div class="related-menu">
+                <button type="button" data-act="tags">Copy tags</button>
+                <button type="button" data-act="open">Open note</button>
+                <button type="button" data-act="both">Link both ways</button>
+              </div>
+            </details>
+          </div>
+        </div>`;
+    }).join('');
+    const key = `${dismissed}|${waiting}|${all.length}|${html}`;
+    if (!force && key === this._relatedKey) return;
+    this._relatedKey = key;
+    wrap.classList.toggle('hidden', !matches.length && !waiting);
+    document.getElementById('modal-related-list').innerHTML = waiting ? '<p class="settings-hint">Looking for similar notes…</p>' : html;
+    document.getElementById('modal-related-dismiss').classList.toggle('hidden', waiting);
+    document.getElementById('modal-related-show')?.classList.toggle('hidden', !dismissed || !all.length);
+  },
+
+  /** Handle a tap on a similar-note button. */
+  relatedAction(act, otherId) {
+    const id = this.currentId;
+    if (!id || !Store.getNote(otherId)) return;
+    if (act === 'open') { this.switchTo(otherId); return; }
+    if ((act === 'project' || act === 'tags') && this.hasUnsavedChanges()) { UI.showToast('Save your changes first.'); return; }
+    if (act === 'link' || act === 'both') {
+      Related.link(id, otherId, act === 'both');
+      UI.showToast(act === 'both' ? 'Linked both ways' : 'Linked', 'ok');
+    } else if (act === 'project') {
+      const project = Store.getNote(otherId).user.project;
+      Related.setProject(id, project);
+      UI.showToast(`Project: ${project}`, 'ok');
+    } else if (act === 'tags') {
+      const n = Related.copyTags(id, otherId);
+      UI.showToast(n ? `Added ${n} tag${n === 1 ? '' : 's'}` : 'No new tags to copy', n ? 'ok' : '');
+    }
+    const note = Store.getNote(id);
+    if (act === 'project' || act === 'tags') {
+      // No unsaved edits (checked above), so the form can take the saved values.
+      document.getElementById('modal-topic').value = _getFinalTags(note).join(', ');
+      this._renderProject(note);
+      this.openSnapshot = this._formSnapshot();
+    }
+    this._renderLinks(note);
+    this._renderRelated(true);
+    Render.renderNotesList();
+  },
+
+  dismissRelated(show = false) {
+    if (!this.currentId) return;
+    Related.setState(this.currentId, show ? 'seen' : 'dismissed');
+    this._renderRelated(true);
+    Render.renderNotesList();
   },
 
   /** Render dynamic fields based on the note type */
@@ -2375,6 +2667,7 @@ const UI = {
     });
 
     if (name !== 'settings') document.getElementById('setting-passcode').type = 'password';
+    if (name !== 'notes') Render.projectFilter = null; // project view is a temporary filter
 
     // Side effects per screen
     if (name === 'notes') { Render.renderNotesList(); Search.schedule(); }
@@ -2554,6 +2847,34 @@ async function init() {
   document.getElementById('modal-save').addEventListener('click',      () => Modal.save());
   document.getElementById('modal-reprocess')?.addEventListener('click', () => Modal.reprocess());
   document.getElementById('modal-copy')?.addEventListener('click', () => Modal.copyCleaned());
+
+  // ── Similar notes, links and projects
+  document.getElementById('modal-related-list')?.addEventListener('click', e => {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    btn.closest('details')?.removeAttribute('open');
+    Modal.relatedAction(btn.dataset.act, btn.closest('.related-item').dataset.id);
+  });
+  document.getElementById('modal-related-dismiss')?.addEventListener('click', () => Modal.dismissRelated());
+  document.getElementById('modal-related-show')?.addEventListener('click', () => Modal.dismissRelated(true));
+  document.getElementById('modal-links-list')?.addEventListener('click', e => {
+    const open = e.target.closest('[data-open]'), remove = e.target.closest('[data-unlink]');
+    if (open) Modal.switchTo(open.dataset.open);
+    if (remove && Modal.currentId) {
+      Related.unlink(Modal.currentId, remove.dataset.unlink);
+      const note = Store.getNote(Modal.currentId);
+      Modal._renderLinks(note); Modal._renderRelated(true); Render.renderNotesList();
+    }
+  });
+  document.getElementById('modal-project-view')?.addEventListener('click', () => {
+    const project = Store.getNote(Modal.currentId)?.user.project;
+    if (!project) return;
+    if (Modal.hasUnsavedChanges() && !confirm('Discard unsaved changes?')) return;
+    Modal.close(); Render.showProject(project);
+  });
+  document.getElementById('project-bar-clear')?.addEventListener('click', () => { Render.projectFilter = null; Render.renderNotesList(); });
+  document.getElementById('related-banner-review')?.addEventListener('click', () => { const id = Related.bannerId; if (id) Modal.open(id); });
+  document.getElementById('related-banner-close')?.addEventListener('click', () => Related.hideBanner());
   document.getElementById('setting-skip-classify')?.addEventListener('change', e => Settings.saveSkipClassify(e.target.checked));
   document.getElementById('setting-model')?.addEventListener('change', () => Settings.saveAiSettings());
   document.getElementById('setting-reasoning')?.addEventListener('change', () => Settings.saveAiSettings());

@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>NoteCapture</title>
-  <link rel="stylesheet" href="styles.css?v=storage-1" />
+  <link rel="stylesheet" href="styles.css?v=related-1" />
 </head>
 <body>
 
@@ -82,6 +82,13 @@
       </button>
     </div>
 
+    <!-- Similar notes found for the note just processed -->
+    <div id="related-banner" class="related-banner hidden" role="status" aria-live="polite">
+      <p id="related-banner-text" class="related-banner-text"></p>
+      <button id="related-banner-review" class="settings-btn" type="button">Review</button>
+      <button id="related-banner-close" class="related-banner-close" type="button" aria-label="Hide">×</button>
+    </div>
+
     <!-- Bottom nav -->
     <nav class="bottomnav">
       <button class="nav-btn active" data-screen="capture" aria-label="Capture">
@@ -114,6 +121,10 @@
       <div class="archive-controls">
         <label>Show <select id="archive-view"><option value="active">Active notes</option><option value="archived">Archived notes</option><option value="all">All notes</option></select></label>
         <label><input id="search-include-archived" type="checkbox" checked /> Include archived in search</label>
+      </div>
+      <div id="project-bar" class="project-bar hidden">
+        <span>◆ Project: <strong id="project-bar-name"></strong></span>
+        <button id="project-bar-clear" class="settings-btn" type="button">Show all notes</button>
       </div>
       <div class="filter-tabs" id="filter-tabs">
         <button class="filter-tab active" data-type="all">All</button>
@@ -207,6 +218,30 @@
       </div>
 
       <p class="settings-hint">Tags: separate each tag with a comma.</p>
+
+      <!-- Project (one per note) -->
+      <div class="modal-project-row">
+        <label class="box-label" for="modal-project">Project</label>
+        <input id="modal-project" class="modal-topic-input" type="text" list="project-options" placeholder="none" autocomplete="off" />
+        <datalist id="project-options"></datalist>
+        <button id="modal-project-view" class="modal-secondary-btn hidden" type="button">View</button>
+      </div>
+
+      <!-- Notes this one links to -->
+      <div id="modal-links" class="modal-links hidden">
+        <span class="box-label">Linked notes</span>
+        <div id="modal-links-list" class="modal-links-list"></div>
+      </div>
+
+      <!-- Similar notes (from the search index) -->
+      <div id="modal-related" class="modal-related hidden">
+        <div class="modal-label-row">
+          <span class="box-label">Similar notes</span>
+          <button id="modal-related-dismiss" class="modal-copy-btn" type="button">Hide</button>
+        </div>
+        <div id="modal-related-list"></div>
+      </div>
+      <button id="modal-related-show" class="text-toggle hidden" type="button">Show similar notes</button>
 
       <!-- Dynamic fields (deadline, priority, location, etc.) -->
       <div id="modal-fields" class="modal-fields"></div>
@@ -428,6 +463,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=storage-1"></script>
+  <script src="app.js?v=related-1"></script>
 </body>
 </html>
