@@ -29,7 +29,8 @@ Everything that isn't instructions for Claude lives here: direction, decisions, 
 ## Next
 - [ ] **Check the storage update on the phone** (after pushing): open the app, confirm all notes are there, make a backup from the banner, add a note, close and reopen.
 - [ ] **Check similar notes on the phone** (after pushing): add two or three notes on a topic you already have, check the "similar notes" line on Capture and the strip in the note, and note the % scores of good and bad matches so the cut-off can be tuned.
-- [ ] **Waiting / who / project.** `waiting` status and a `who` field for handed-off tasks. `project` as decided above. Collapse the six types toward Note / Task / Idea, with date and reminder as attributes.
+- [ ] **Fewer types; urgent and important as tags.** Cut the six types (To-do, Reminder, Schedule, Idea, Research, Note) down to three; the plan so far says Note / Task / Idea, with date and reminder kept as details on the note. Make urgent, important and similar flags tags instead of separate fields (today urgency is its own `ai.urgency` field). Changes stored notes: needs a migration, a data version bump and a backup first. Also touches the Worker prompt, the filter tabs and the Obsidian export.
+- [ ] **Waiting / who.** `waiting` status and a `who` field for handed-off tasks.
 - [ ] **Test the clarification prompt on the live model** with real notes and adjust `DEFAULT_PROCESSING_PROMPT` in `worker.js`:
   - "Court hearing next Tuesday" → urgent; ask the time and which court.
   - "Have to submit the form today" → urgent; ask which form / where if unclear.
@@ -54,7 +55,7 @@ Everything that isn't instructions for Claude lives here: direction, decisions, 
 - Similarity cut-off for related notes: set to 60% (`Related.MIN_SCORE`). Adjust once real notes show which scores are good matches.
 
 ## Known bugs
-- None recorded yet. Add them here as `- [ ] what happens — where — how to reproduce`.
+- [ ] Restoring a JSON backup doesn't seem to work: after choosing the file nothing visibly happens, not even the file name showing; it may just be slow with no progress shown. Where: Settings → backup import (`Backup.import`). How to reproduce: Settings → choose a `.json` full backup on the phone and wait. Reported 2026-11-01.
 
 ## Done
 - [x] 2026-11-01: **Similar notes after processing.** When a note finishes processing, the app compares it with your other notes using the vectors the search index already makes (no extra AI call or cost) and shows up to 3 at 60% or more. Shown as a line on the Capture screen ("3 similar notes · Review"), a label on the note's card, and a "Similar notes" box in the note with **Link**, **Use project** and **⋯** (Copy tags, Open note, Link both ways). Nothing is applied by itself; **Hide** hides the box for that note. Also added: a Project field on the note (suggests existing projects), linked notes as chips (tap to open, × to remove), and a project view (tap **View** to list every note in that project). Scores show as "% similar" in the box instead of Diagnostics, so tuning happens on real notes. The show/hide state per note is kept in `nc_related` (not in the note), so no data migration. Tests: `tests/related.cjs`.
