@@ -47,7 +47,17 @@ globalThis.fetch = async () => Response.json({ choices: [{ finish_reason: 'lengt
 data = await (await worker.fetch(req('/process', { raw_text: 'x' }), env)).json();
 assert.equal(data.status, 'ai_failed'); assert.equal(data.usage.completion_tokens, 4096);
 
+// Three types: an old type name from the model is mapped; unknown types fail
+globalThis.fetch = groq({ type: 'Reminder', cleaned_text: 'x' });
+data = await (await worker.fetch(req('/process', { raw_text: 'x' }), env)).json();
+assert.equal(data.result.type, 'task');
+globalThis.fetch = groq({ type: 'research', cleaned_text: 'x' });
+assert.equal((await (await worker.fetch(req('/process', { raw_text: 'x' }), env)).json()).result.type, 'idea');
+globalThis.fetch = groq({ type: 'event', cleaned_text: 'x' });
+assert.equal((await (await worker.fetch(req('/process', { raw_text: 'x' }), env)).json()).status, 'ai_failed');
+
 // Prompt mentions the new schema keys
 const prompts = await (await worker.fetch(req('/prompts'), env)).json();
 assert(prompts.processing_prompt.includes('"urgency"') && prompts.processing_prompt.includes('court'));
-console.log('PASS: model/effort allowlist, usage reporting (tokens, reasoning, audio seconds, failures), urgency normalisation, prompt schema.');
+assert(prompts.processing_prompt.includes(' task —') && !prompts.processing_prompt.includes(' todo —') && prompts.processing_prompt.includes('who'));
+console.log('PASS: model/effort allowlist, usage reporting (tokens, reasoning, audio seconds, failures), urgency normalisation, three types, prompt schema.');

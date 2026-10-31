@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>NoteCapture</title>
-  <link rel="stylesheet" href="styles.css?v=restore-1" />
+  <link rel="stylesheet" href="styles.css?v=types-1" />
 </head>
 <body>
 
@@ -128,11 +128,8 @@
       </div>
       <div class="filter-tabs" id="filter-tabs">
         <button class="filter-tab active" data-type="all">All</button>
-        <button class="filter-tab" data-type="todo">To-do</button>
-        <button class="filter-tab" data-type="reminder">Reminder</button>
-        <button class="filter-tab" data-type="schedule">Schedule</button>
+        <button class="filter-tab" data-type="task">Task</button>
         <button class="filter-tab" data-type="idea">Idea</button>
-        <button class="filter-tab" data-type="research">Research</button>
         <button class="filter-tab" data-type="note">Note</button>
       </div>
     </div>
@@ -207,11 +204,8 @@
       <!-- Type + topic row -->
       <div class="modal-meta">
         <select aria-label="Classification" id="modal-type" class="modal-select">
-          <option value="todo">To-do</option>
-          <option value="reminder">Reminder</option>
-          <option value="schedule">Schedule</option>
+          <option value="task">Task</option>
           <option value="idea">Idea</option>
-          <option value="research">Research</option>
           <option value="note">Note</option>
         </select>
         <input id="modal-topic" class="modal-topic-input" type="text" placeholder="hotel, maintenance" aria-label="Tags" />
@@ -460,16 +454,13 @@
       <p class="type-picker-title">Set note type</p>
       <div class="type-picker-options" id="type-picker-options">
         <button class="type-opt" data-type="auto">auto (AI decides)</button>
-        <button class="type-opt" data-type="todo">To-do</button>
-        <button class="type-opt" data-type="reminder">Reminder</button>
-        <button class="type-opt" data-type="schedule">Schedule</button>
+        <button class="type-opt" data-type="task">Task</button>
         <button class="type-opt" data-type="idea">Idea</button>
-        <button class="type-opt" data-type="research">Research</button>
         <button class="type-opt" data-type="note">Note</button>
       </div>
     </div>
   </div>
 
-  <script src="app.js?v=restore-1"></script>
+  <script src="app.js?v=types-1"></script>
 </body>
 </html>

@@ -77,7 +77,7 @@ const idbNotes = dbs => dbs.get('nc_notes_db')?.get('kv')?.get('notes');
   assert.equal(moved.find(n => n.id === 'a').user.exported_at, undefined, '"In Obsidian" label removed');
   assert.equal(moved.find(n => n.id === 'b').user.archived_at, '2026-10-20T00:00:00Z', 'user-archived note stays archived');
   assert(moved.every(n => Array.isArray(n.user.links) && n.user.project === null));
-  assert.equal(local.get('nc_data_version'), '4');
+  assert.equal(local.get('nc_data_version'), '5');
   assert.equal(local.get('nc_notes'), JSON.stringify(old), 'pre-move copy is left untouched');
 
   // 2. Saves reach IndexedDB, not localStorage.
@@ -121,7 +121,7 @@ const idbNotes = dbs => dbs.get('nc_notes_db')?.get('kv')?.get('notes');
   await app.a.Backup.import(new File([JSON.stringify(incoming)], 'b.json'));
   assert.deepEqual([...app.a.Store.getNote('c').user.links], ['a']); assert.equal(app.a.Store.getNote('c').user.project, 'House move');
   assert.throws(() => app.a.validateBackup({ schema_version: 4, notes: [{ id: 'x', input: {}, user: { links: [5] } }] }), /links/);
-  assert.throws(() => app.a.validateBackup({ schema_version: 5, notes: [] }), /Unsupported/);
+  assert.throws(() => app.a.validateBackup({ schema_version: 6, notes: [] }), /Unsupported/);
 
   // 8. Backup reminder.
   local.delete('nc_last_backup');
@@ -129,7 +129,7 @@ const idbNotes = dbs => dbs.get('nc_notes_db')?.get('kv')?.get('notes');
   assert(st.due && st.show && !st.last, 'never backed up + notes = due');
   await app.a.Backup.export();
   const backup = JSON.parse(await app.context.download.blob.text());
-  assert.equal(backup.schema_version, 4); assert(local.get('nc_last_backup'));
+  assert.equal(backup.schema_version, 5); assert(local.get('nc_last_backup'));
   st = app.a.BackupReminder.state(); assert(!st.due && st.changed === 0, JSON.stringify(st));
   assert(app.a.BackupReminder.state(Date.now() + 8 * 86_400_000).due, 'due after 7 days');
   const many = app.a.Store.getNotes();

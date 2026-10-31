@@ -24,6 +24,7 @@
 
   /* Note type colours — swap freely */
   --type-todo:       #e05858;
+  --type-task:       #e07840;
   --type-reminder:   #e07840;
   --type-schedule:   #6090e0;
   --type-idea:       #50c878;
@@ -449,6 +450,7 @@ a { color: var(--accent); }
 .note-card:active { background: var(--bg-hover); }
 
 /* Colour left border by type */
+.note-card[data-type="task"]     { border-left: 3px solid var(--type-task); }
 .note-card[data-type="todo"]     { border-left: 3px solid var(--type-todo); }
 .note-card[data-type="reminder"] { border-left: 3px solid var(--type-reminder); }
 .note-card[data-type="schedule"] { border-left: 3px solid var(--type-schedule); }
@@ -474,6 +476,7 @@ a { color: var(--accent); }
 }
 
 /* Badge colours per type */
+.note-type-badge.task     { background: rgba(224,120,64,0.15); color: var(--type-task); }
 .note-type-badge.todo     { background: rgba(224,88,88,0.15); color: var(--type-todo); }
 .note-type-badge.reminder { background: rgba(224,120,64,0.15); color: var(--type-reminder); }
 .note-type-badge.schedule { background: rgba(96,144,224,0.15); color: var(--type-schedule); }
@@ -1366,6 +1369,7 @@ summary { color: var(--text-primary); cursor: pointer; padding: 12px 0; }
 /* Urgent badge, copy button, usage readout */
 .note-urgent-badge { font-family: var(--font-ui); font-size: 0.65rem; letter-spacing: 0.06em; padding: 0.15rem 0.45rem; border-radius: 3px; text-transform: uppercase; font-weight: 700; background: #ff6b6b; color: #1a0000; margin-left: 0.35rem; }
 .note-card:has(.note-urgent-badge) { border-left: 3px solid #ff6b6b; }
+.note-important-badge { font-family: var(--font-ui); font-size: 0.65rem; letter-spacing: 0.06em; padding: 0.15rem 0.45rem; border-radius: 3px; text-transform: uppercase; font-weight: 700; border: 1px solid #ffb35c; color: #ffb35c; margin-left: 0.35rem; }
 .modal-label-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .modal-copy-btn { min-height: 44px; min-width: 64px; padding: 0 14px; background: var(--bg-raised); color: var(--accent); border: 1px solid var(--border); border-radius: 6px; font-size: .85rem; }
 .modal-copy-btn:active { background: var(--bg-hover); }

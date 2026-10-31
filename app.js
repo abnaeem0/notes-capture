@@ -53,8 +53,8 @@ const CONFIG = {
   },
 
   API_VERSION: 2,
-  DATA_VERSION: 4,        // note schema version (migrateNotes)
-  BACKUP_SCHEMA: 4,       // JSON backup schema_version written by Backup.export
+  DATA_VERSION: 5,        // note schema version (migrateNotes)
+  BACKUP_SCHEMA: 5,       // JSON backup schema_version written by Backup.export
   BACKUP_REMIND_DAYS: 7,  // remind to back up after this many days…
   BACKUP_REMIND_CHANGES: 20, // …or this many new/changed notes since the last backup
   DEFAULT_TRANSCRIPTION_PROMPT: '',
@@ -71,14 +71,18 @@ const CONFIG = {
   // Note types — add/rename here, UI updates automatically
   // ⚠️ Changing values here will orphan old notes with old type strings.
   //    To rename: update value + write a migration in migrateNotes().
+  // Three types since data version 5 (2026-11-01): Task = something has to happen,
+  // Idea = maybe / think later, Note = information to keep.
   TYPES: [
-    { value: 'todo',     label: 'To-do',    color: 'var(--type-todo)' },
-    { value: 'reminder', label: 'Reminder', color: 'var(--type-reminder)' },
-    { value: 'schedule', label: 'Schedule', color: 'var(--type-schedule)' },
-    { value: 'idea',     label: 'Idea',     color: 'var(--type-idea)' },
-    { value: 'research', label: 'Research', color: 'var(--type-research)' },
-    { value: 'note',     label: 'Note',     color: 'var(--type-note)' },
+    { value: 'task', label: 'Task', color: 'var(--type-task)' },
+    { value: 'idea', label: 'Idea', color: 'var(--type-idea)' },
+    { value: 'note', label: 'Note', color: 'var(--type-note)' },
   ],
+  // Old type values (data version ≤ 4) and what they became. Used by the migration,
+  // old backups and an older Worker that still returns the old values.
+  LEGACY_TYPES: { todo: 'task', reminder: 'task', schedule: 'task', research: 'idea' },
+  // Tags that mark priority (replace the old separate urgency field). Shown as badges, not as the topic.
+  FLAG_TAGS: ['urgent', 'important'],
 };
 
 
@@ -347,6 +351,12 @@ const Store = {
       this.setNotes(this.getNotes().map(normalizeNote));
       localStorage.setItem(CONFIG.KEYS.DATA_VERSION, '4');
     }
+    // Version 5 — three types (Task / Idea / Note), task details when/where/who, urgency becomes
+    // the "urgent" tag. Old values are kept on each changed note under `legacy_v4` (see normalizeNote).
+    if (currentVersion < 5) {
+      this.setNotes(this.getNotes().map(normalizeNote));
+      localStorage.setItem(CONFIG.KEYS.DATA_VERSION, '5');
+    }
   },
 };
 
@@ -372,12 +382,62 @@ function normalizeNote(note) {
   // Links to other notes (ids) and a single project name; used by related-note suggestions.
   note.user.links = Array.isArray(note.user.links) ? note.user.links.filter(id => typeof id === 'string' && id && id !== note.id) : [];
   note.user.project = typeof note.user.project === 'string' && note.user.project.trim() ? note.user.project.trim() : null;
+  _migrateTypesV5(note);
   // Undo the old "Obsidian owns it" step: un-archive only what the export archived.
   if (note.user.exported_at) {
     if (note.user.archived_at === note.user.exported_at) note.user.archived_at = null;
     delete note.user.exported_at;
   }
   return note;
+}
+
+/** Map an old type value to the current one ('todo' → 'task'); current values pass through. */
+function _currentType(type) {
+  if (!type) return type;
+  const t = String(type).trim().toLowerCase().replace(/^to[- ]do$/, 'todo');
+  return CONFIG.LEGACY_TYPES[t] || t;
+}
+
+const _LEGACY_FIELD_KEYS = ['action', 'priority', 'due_datetime', 'datetime', 'location', 'event_name'];
+/** Old per-type fields → current fields. Dates and places carry over; action / event name / priority
+ *  are already in the note text and summary, so they're dropped (kept under legacy_v4). */
+function _currentFields(fields) {
+  if (!fields || typeof fields !== 'object') return fields;
+  if (!_LEGACY_FIELD_KEYS.some(k => k in fields)) return fields;
+  const out = {};
+  const when = fields.when || fields.due_datetime || fields.datetime;
+  const where = fields.where || fields.location;
+  if (when) out.when = when;
+  if (where) out.where = where;
+  if (fields.who) out.who = fields.who;
+  if (fields.follow_up_question) out.follow_up_question = fields.follow_up_question;
+  return out;
+}
+
+/** Version 5 change on one note: old types, old fields and ai.urgency → current shape.
+ *  Idempotent. The replaced values are kept in note.legacy_v4 so nothing is lost. */
+function _migrateTypesV5(note) {
+  const legacy = {};
+  if (note.ai.type && _currentType(note.ai.type) !== note.ai.type) { legacy.ai_type = note.ai.type; note.ai.type = _currentType(note.ai.type); }
+  if (note.user.type_override && _currentType(note.user.type_override) !== note.user.type_override) {
+    legacy.type_override = note.user.type_override; note.user.type_override = _currentType(note.user.type_override);
+  }
+  if (note.user.type_override && note.user.type_override === note.ai.type) note.user.type_override = null; // e.g. todo vs reminder: both Task now
+  const aiF = _currentFields(note.ai.fields);
+  if (aiF !== note.ai.fields) { legacy.ai_fields = note.ai.fields; note.ai.fields = aiF; }
+  const userF = _currentFields(note.user.fields);
+  if (userF !== note.user.fields) { legacy.user_fields = note.user.fields; note.user.fields = userF; }
+  if ('urgency' in note.ai) {
+    if (note.ai.urgency === 'urgent' && !note.ai.topics.some(t => String(t).toLowerCase() === 'urgent')) note.ai.topics.push('urgent');
+    if (note.ai.urgency === 'urgent') legacy.urgency = 'urgent';
+    delete note.ai.urgency;
+  }
+  if (Object.keys(legacy).length) note.legacy_v4 = { ...legacy, ...(note.legacy_v4 || {}) };
+}
+
+/** True when the note's final tags include this flag (e.g. 'urgent'). */
+function _hasTag(note, tag) {
+  return _getFinalTags(note).some(t => t.toLowerCase() === tag);
 }
 
 function visibleNotes(notes, view, query, includeArchived) {
@@ -472,8 +532,9 @@ function validateBackup(data) {
     if (n.user?.links != null && (!Array.isArray(n.user.links) || n.user.links.some(v => typeof v !== 'string'))) throw new Error('Invalid links in backup.');
     if (n.user?.project != null && typeof n.user.project !== 'string') throw new Error('Invalid project in backup.');
     if (n.input.audio_blob_key && !n.input.audio_blob_key.startsWith('nc_audio_')) throw new Error('Invalid recording key.');
-    if (n.ai?.type && !CONFIG.TYPES.some(t => t.value === n.ai.type)) throw new Error('Unknown note type.');
-    if (n.user?.type_override && !CONFIG.TYPES.some(t => t.value === n.user.type_override)) throw new Error('Unknown note type override.');
+    // Old backups (schema ≤ 4) use the old type names; normalizeNote maps them.
+    if (n.ai?.type && !CONFIG.TYPES.some(t => t.value === _currentType(n.ai.type))) throw new Error('Unknown note type.');
+    if (n.user?.type_override && !CONFIG.TYPES.some(t => t.value === _currentType(n.user.type_override))) throw new Error('Unknown note type override.');
   }
   const audios = new Set();
   for (const a of data.audio || []) {
@@ -535,7 +596,7 @@ const Usage = {
 };
 
 /* ── Markdown export (Obsidian) ─────────────────────────────────────────── */
-const MD_FIELD_KEYS = { due_datetime: 'due', datetime: 'when', location: 'where', event_name: 'event', action: 'action', priority: 'priority', follow_up_question: 'follow_up' };
+const MD_FIELD_KEYS = { when: 'when', where: 'where', who: 'who', follow_up_question: 'follow_up' };
 
 function _yamlStr(v) { return JSON.stringify(String(v)); } // JSON strings are valid YAML double-quoted scalars
 
@@ -557,10 +618,11 @@ function noteToMarkdown(note) {
   const summary = _getFinalSummary(note);
   const lines = ['---', `id: ${_yamlStr(note.id)}`, `type: ${type}`,
     `status: ${note.user?.completed_at ? 'done' : note.status === 'transcription_review' ? 'needs-review' : 'open'}`];
-  if (note.ai?.urgency === 'urgent') {
+  if (_hasTag(note, 'urgent')) {
     lines.push('urgent: true');
-    if (note.ai.urgency_reason) lines.push(`urgent_reason: ${_yamlStr(note.ai.urgency_reason)}`);
+    if (note.ai?.urgency_reason) lines.push(`urgent_reason: ${_yamlStr(note.ai.urgency_reason)}`);
   }
+  if (_hasTag(note, 'important')) lines.push('important: true');
   for (const [k, v] of Object.entries(fields)) {
     if (v != null && String(v).trim() !== '' && MD_FIELD_KEYS[k]) lines.push(`${MD_FIELD_KEYS[k]}: ${_yamlStr(v)}`);
   }
@@ -649,7 +711,7 @@ const Backup = {
     const asking = withText.filter(n => n.status === 'needs_context' && n.user?.dismissed_question_id !== _questionKey(n));
     const waiting = withText.filter(n => !held.includes(n) && !asking.includes(n) && workerSet && (n.status === 'raw' || n.status === 'processing'));
     const ready = withText.filter(n => !held.includes(n) && !asking.includes(n) && !waiting.includes(n));
-    return { ready, held: held.length, asking: asking.length, askingUrgent: asking.filter(n => n.ai?.urgency === 'urgent').length, waiting: waiting.length };
+    return { ready, held: held.length, asking: asking.length, askingUrgent: asking.filter(n => _hasTag(n, 'urgent')).length, waiting: waiting.length };
   },
   /** Obsidian export (optional copy): one .md per note in a ZIP. "New notes" skips ids already sent. Audio is not included. */
   exportMarkdown(all = false) {
@@ -745,7 +807,7 @@ const Backup = {
       Search.schedule(); Render.renderNotesList(); UI.updatePendingBadge();
       const summary = `${added} added, ${updated} updated, ${kept} already up to date.`;
       this.progress(`Done: ${summary}`, 'done');
-      this.status(`Imported: ${summary}${missing ? ` ${missing} recording(s) were absent from this backup.` : ''}`);
+      this.status(missing ? `${missing} recording(s) were absent from this backup; those notes need text entered by hand.` : '');
       UI.showToast(`Backup restored: ${added} added, ${updated} updated`, 'ok');
     } catch (err) {
       if (!committed) for (const key of staged) await AudioStore.remove(key).catch(() => {});
@@ -1207,7 +1269,8 @@ function _applyAiResult(note, result) {
   }
 
   // ── Default structured mode ──────────────────────────────────
-  note.ai.type               = result.type || 'note';
+  const type                 = CONFIG.TYPES.some(t => t.value === _currentType(result.type)) ? _currentType(result.type) : 'note';
+  note.ai.type               = type;
   note.ai.type_confidence    = result.type_confidence || 'high';
   note.ai.cleaned_text       = result.cleaned_text || note.input.raw_text;
   note.ai.summary            = result.summary || '';
@@ -1216,23 +1279,23 @@ function _applyAiResult(note, result) {
     ? result.topics.filter(Boolean).slice(0, 4)
     : (result.topic ? [result.topic] : []);
   // Strip fields to only allowed keys for this type — no AI extras
-  note.ai.fields             = _sanitiseFields(result.type, result.fields || {});
+  note.ai.fields             = _sanitiseFields(type, _currentFields(result.fields || {}) || {});
   note.ai.clarification_needed   = !!result.clarification_needed;
   note.ai.clarification_question = result.clarification_question || null;
-  note.ai.urgency                = result.urgency === 'urgent' ? 'urgent' : 'normal';
-  note.ai.urgency_reason         = note.ai.urgency === 'urgent' ? (result.urgency_reason || null) : null;
+  // Urgency is a tag now. An older Worker still sends urgency: 'urgent'; turn that into the tag.
+  const urgent = result.urgency === 'urgent' || note.ai.topics.some(t => String(t).toLowerCase() === 'urgent');
+  if (urgent && !note.ai.topics.some(t => String(t).toLowerCase() === 'urgent')) note.ai.topics.push('urgent');
+  note.ai.urgency_reason         = urgent ? (result.urgency_reason || null) : null;
+  delete note.ai.urgency;
 }
 
 /** Strip AI fields to only the allowed keys for each note type.
  *  Prevents AI from sneaking in sentiment/warning fields. */
 function _sanitiseFields(type, fields) {
   const ALLOWED = {
-    todo:     ['action', 'priority'],
-    reminder: ['action', 'due_datetime'],
-    schedule: ['event_name', 'datetime', 'location'],
-    idea:     ['follow_up_question'],
-    research: ['follow_up_question'],
-    note:     [],
+    task: ['when', 'where', 'who'],
+    idea: ['follow_up_question'],
+    note: [],
   };
   const allowed = ALLOWED[type] || [];
   return Object.fromEntries(allowed.map(k => [k, fields[k] ?? '']));
@@ -1240,7 +1303,7 @@ function _sanitiseFields(type, fields) {
 
 /** Return the final displayed type after any user override. */
 function _getFinalType(note) {
-  return note.user?.type_override || note.ai?.type || 'note';
+  return _currentType(note.user?.type_override || note.ai?.type) || 'note';
 }
 
 /** Return final cleaned text without overwriting the AI's original output. */
@@ -1295,6 +1358,7 @@ function _getExistingTopics() {
   Store.getNotes().forEach(note => {
     _getFinalTags(note).forEach(topic => {
       const key = topic.toLowerCase();
+      if (CONFIG.FLAG_TAGS.includes(key)) return; // flags are decided per note, not reused as topics
       if (!seen.has(key)) {
         seen.add(key);
         topics.push(topic);
@@ -1796,7 +1860,7 @@ const Render = {
 function _noteCardHTML(note, matchLabel = '') {
   const type    = _getFinalType(note);
   const label   = CONFIG.TYPES.find(t => t.value === type)?.label || type;
-  const topic   = _getFinalTags(note)[0] || '';
+  const topic   = _getFinalTags(note).find(t => !CONFIG.FLAG_TAGS.includes(t.toLowerCase())) || '';
   const summary = _getFinalSummary(note) || _getFinalCleanedText(note) || note.input.raw_text || '(no content)';
   const time    = _relativeTime(note.created_at);
 
@@ -1808,7 +1872,8 @@ function _noteCardHTML(note, matchLabel = '') {
     <div class="note-card ${needsCtx} ${isPending}" data-id="${escHtml(note.id)}" data-type="${escHtml(type)}">
       <div class="note-card-top">
         <span class="note-type-badge ${type}">${escHtml(label)}</span>
-        ${note.ai?.urgency === 'urgent' ? `<span class="note-urgent-badge" title="${escHtml(note.ai.urgency_reason || 'Urgent')}">Urgent</span>` : ''}
+        ${_hasTag(note, 'urgent') ? `<span class="note-urgent-badge" title="${escHtml(note.ai?.urgency_reason || 'Urgent')}">Urgent</span>` : ''}
+        ${_hasTag(note, 'important') ? '<span class="note-important-badge">Important</span>' : ''}
         ${topic ? `<span class="note-topic">${escHtml(topic)}</span>` : ''}
       </div>
       <p class="note-summary">${escHtml(summary)}</p>
@@ -1873,7 +1938,7 @@ const Modal = {
 
     document.getElementById('modal-archive').textContent = note.user.archived_at ? 'Restore to active' : 'Archive';
     const complete = document.getElementById('modal-complete');
-    complete.classList.toggle('hidden', !['todo', 'reminder', 'schedule'].includes(type) && !note.user.completed_at);
+    complete.classList.toggle('hidden', type !== 'task' && !note.user.completed_at);
     complete.textContent = note.user.completed_at ? 'Mark not done' : 'Done & archive';
     document.getElementById('modal-audio-status').textContent = note.input.transcription_quality?.reasons?.join(' ') || '';
     document.getElementById('modal-audio-transcript').textContent = note.input.raw_text || '(No words detected)';
@@ -1909,7 +1974,7 @@ const Modal = {
     this._renderHistory(note);
     this._renderContextPanel(note);
     const complete = document.getElementById('modal-complete');
-    complete.classList.toggle('hidden', !['todo', 'reminder', 'schedule'].includes(_getFinalType(note)) && !note.user.completed_at);
+    complete.classList.toggle('hidden', _getFinalType(note) !== 'task' && !note.user.completed_at);
     if (!note.input.audio_blob_key) AudioPlayer.hide();
     this.openSnapshot = this._formSnapshot();
   },
@@ -2264,12 +2329,9 @@ const Modal = {
     const fields = _getFinalFields(note);
 
     const FIELD_DEFS = {
-      todo:     [{ key: 'action', label: 'Action', type: 'text' }, { key: 'priority', label: 'Priority', type: 'text' }],
-      reminder: [{ key: 'action', label: 'Action', type: 'text' }, { key: 'due_datetime', label: 'Due', type: 'text' }],
-      schedule: [{ key: 'event_name', label: 'Event', type: 'text' }, { key: 'datetime', label: 'When', type: 'text' }, { key: 'location', label: 'Where', type: 'text' }],
-      idea:     [{ key: 'follow_up_question', label: 'Follow-up', type: 'text' }],
-      research: [{ key: 'follow_up_question', label: 'Follow-up', type: 'text' }],
-      note:     [],
+      task: [{ key: 'when', label: 'When', type: 'text' }, { key: 'where', label: 'Where', type: 'text' }, { key: 'who', label: 'Who', type: 'text' }],
+      idea: [{ key: 'follow_up_question', label: 'Follow-up', type: 'text' }],
+      note: [],
     };
 
     const defs = FIELD_DEFS[type] || [];
@@ -2804,7 +2866,7 @@ async function init() {
 
   // ── Type badge (capture screen)
   const savedType = localStorage.getItem(CONFIG.KEYS.CAPTURE_TYPE);
-  Capture.captureTypeOverride = CONFIG.TYPES.some(t => t.value === savedType) ? savedType : null;
+  Capture.captureTypeOverride = CONFIG.TYPES.some(t => t.value === _currentType(savedType)) ? _currentType(savedType) : null;
   refreshCaptureType();
   document.getElementById('type-badge').addEventListener('click', () => {
     document.getElementById('type-picker').classList.remove('hidden');

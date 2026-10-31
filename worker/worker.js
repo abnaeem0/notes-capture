@@ -1,6 +1,6 @@
 /** NoteCapture stateless Worker. Keep PASSCODE and GROQ_API_KEY in Cloudflare secrets. */
 const API_VERSION = 2;
-const WORKER_VERSION = 'classification-style-3';
+const WORKER_VERSION = 'three-types-1';
 const DEFAULT_TRANSCRIPTION_PROMPT = '';
 const DEFAULT_PROCESSING_PROMPT = `You are a personal note classification assistant.
 The input may mix English, Urdu and Arabic. The speaker does not use Hindi or Punjabi.
@@ -8,12 +8,10 @@ Return cleaned_text, summary, clarification_question and descriptive fields in E
 Preserve names, proper nouns and the meaning of Arabic expressions faithfully.
 
 Choose exactly one type:
- todo — an action without a specific required time.
- reminder — an action tied to a time or deadline.
- schedule — an event or appointment.
- idea — an original thought, possibility or proposal.
- research — something to investigate or learn.
- note — other information or observations.
+ task — something has to happen: an action, errand, deadline, reminder, appointment or event,
+   including things the user asks someone else to do or is waiting on.
+ idea — a maybe: an original thought, possibility, proposal, or something to look into or learn later.
+ note — information to keep: facts, observations, records, things that happened.
 
 Rules:
 1. cleaned_text: understand the entire note and rewrite it as clear, coherent, natural English.
@@ -32,6 +30,8 @@ in cleaned_text. If the source is already English, still remove rambling and imp
 2. Summary: one sentence, at most 15 words. No "the user wants to" filler.
 3. topics: 1–4 relevant tags, lowercase, trim and collapse spaces, no duplicates.
 Prefer existing meaningful tags to synonymous new tags; never add tags to reach four.
+Add the extra tag "important" (on top of the topic tags) when the note is high-stakes but not
+time-critical (legal, medical, money, family obligations). Do not add "urgent" yourself; use urgency.
 4. Urgency. Set urgency to "urgent" when the note is time-critical or high-stakes, either
 by context (court or legal dates, hearings, medical appointments, exams, flights, visas, payment or
 filing deadlines, anything where missing it has serious consequences) or by cues in the words
@@ -50,10 +50,9 @@ hearing, and which court?". Do not guess missing facts; use null or empty string
  - Do not ask about details that are already present or that do not change what the user must do.
 6. type_confidence is high or low. Clarification is not required just to polish wording.
 7. fields: only keys appropriate to type:
- todo: action, priority (high/medium/low)
- reminder: action, due_datetime
- schedule: event_name, datetime, location
- idea/research: follow_up_question
+ task: when (due date or appointment date/time, as stated or resolved from the capture time),
+       where (place), who (the person it is for, involves, or is handed to). Use "" when not stated.
+ idea: follow_up_question
  note: no fields.
 8. Use the provided capture time and timezone to interpret relative dates. When editing
 an existing note, do not shift an established date just because it is being processed later.
@@ -61,6 +60,9 @@ an existing note, do not shift an established date just because it is being proc
 {"type":"note","type_confidence":"high","cleaned_text":"…","summary":"…",
 "topics":[],"fields":{},"urgency":"normal","urgency_reason":null,
 "clarification_needed":false,"clarification_question":null}`;
+
+/** Old type names (before 2026-11-01) and what they became. */
+const LEGACY_TYPES = { todo: 'task', reminder: 'task', schedule: 'task', research: 'idea' };
 
 /** Models the app may choose. An allowlist stops a leaked passcode from selecting costly models. */
 const ALLOWED_MODELS = ['openai/gpt-oss-20b', 'openai/gpt-oss-120b'];
@@ -247,7 +249,8 @@ async function callGroq(prompt, apiKey, model = DEFAULT_MODEL, effort = DEFAULT_
         fields: {}, urgency: 'normal', urgency_reason: null, clarification_needed: false, clarification_question: null } };
     }
     parsed.type = String(parsed.type || '').trim().toLowerCase().replace(/^to[- ]do$/, 'todo');
-    if (!['todo', 'reminder', 'schedule', 'idea', 'research', 'note'].includes(parsed.type)) return { ok: false, usage, error: 'AI returned no valid category. Retry processing this note.' };
+    parsed.type = LEGACY_TYPES[parsed.type] || parsed.type; // a model may still answer with an old type name
+    if (!['task', 'idea', 'note'].includes(parsed.type)) return { ok: false, usage, error: 'AI returned no valid category. Retry processing this note.' };
     parsed.urgency = String(parsed.urgency || '').trim().toLowerCase() === 'urgent' ? 'urgent' : 'normal';
     parsed.urgency_reason = parsed.urgency === 'urgent' && typeof parsed.urgency_reason === 'string' ? parsed.urgency_reason.trim().slice(0, 80) || null : null;
     return { ok: true, usage, data: parsed };

@@ -43,6 +43,7 @@ The app is the main home for notes. Obsidian markdown is a backup to export to a
 - `worker-usage.mjs`: model allowlist, usage reporting, urgency.
 - `storage.cjs`: IndexedDB move and recovery cases, schema 4, backup reminder (uses a small fake IndexedDB).
 - `related.cjs`: similar notes, links, projects, project view.
+- `types.cjs`: three types, version 5 migration, urgency as a tag, old backups and old Worker answers.
 
 ## Architecture
 - Notes live in IndexedDB (`nc_notes_db`, one record holding the whole array); `Store` keeps an in-memory copy and writes in the background (`setNotes` returns a promise; `Store.flush()` waits for all writes). The old `nc_notes` localStorage value is a frozen pre-move safety copy; `nc_notes_backend` marks the move. Without IndexedDB (tests), `Store` falls back to localStorage. Recordings are in IndexedDB (`nc_audio_store`); search vectors in a disposable IndexedDB cache (`nc_search`). There is no server-side copy of notes. One device only, by choice. The JSON full backup is the backup.
@@ -59,6 +60,7 @@ node tests/worker.mjs            # transcription quality + retries
 node tests/worker-usage.mjs      # model allowlist, usage reporting, urgency
 node tests/storage.cjs           # IndexedDB storage, recovery, backup reminder
 node tests/related.cjs           # similar notes, links, projects
+node tests/types.cjs             # three types, v5 migration, urgent/important tags
 node --check app.js              # quick syntax check
 ```
 Check UI changes by hand on a phone.
@@ -66,13 +68,14 @@ Check UI changes by hand on a phone.
 ## Conventions
 - Note shape: `input` (original text, audio), `ai` (model output, never overwritten by user edits), `user` (overrides: `type_override`, `cleaned_text`, `fields`, tags), `sync`. Read through the `_getFinal*` helpers so user edits win.
 - `original_text` is set once at capture and never overwritten.
-- Schema changes need a migration in `migrateNotes()`, a bump of `CONFIG.DATA_VERSION`, and a bump of `CONFIG.BACKUP_SCHEMA` (backups). Currently 4. Every note has `user.links` (note ids) and `user.project` (string or null); `normalizeNote()` fills them.
+- Schema changes need a migration in `migrateNotes()`, a bump of `CONFIG.DATA_VERSION`, and a bump of `CONFIG.BACKUP_SCHEMA` (backups). Currently 5. Every note has `user.links` (note ids) and `user.project` (string or null); `normalizeNote()` fills them.
+- Types are `task`, `idea`, `note` (`CONFIG.TYPES`). Old names (`todo`, `reminder`, `schedule`, `research`) are mapped by `_currentType()` / `CONFIG.LEGACY_TYPES` wherever notes come in (migration, backups, Worker answers). Task fields: `when`, `where`, `who`; Idea: `follow_up_question`. Priority is a tag (`CONFIG.FLAG_TAGS`: `urgent`, `important`); read it with `_hasTag(note, 'urgent')`, not a separate field. Version 5 keeps replaced values in `note.legacy_v4`.
 - When `app.js` or `styles.css` change, bump the `?v=` tag on both in `index.html`, or phones keep the cached old copy.
 - New settings go through `CONFIG.KEYS`; `clearAll` wipes every key listed there.
 - Groq list prices are in `CONFIG.PRICES` and are estimates. Re-check them before relying on the cost readout.
 
 ## Obsidian export (`Backup.exportMarkdown`), optional copy
-- One `.md` per note in a ZIP: frontmatter (id, type, status, urgent, due/when/where, tags, source, created, updated) + English text + `## Original`.
+- One `.md` per note in a ZIP: frontmatter (id, type, status, urgent, important, when/where/who, tags, source, created, updated) + English text + `## Original`.
 - Exporting changes nothing in the app (no archiving, no label). "Export new notes" skips ids already sent (`nc_md_exported`); "Export all again" can duplicate. The round trip (repeatable export + import) is on ice; see `PLAN.md`.
 - Held back until resolved: notes with an uncertain transcript (`transcription_review`; the audio only exists in the app), notes with an unanswered AI question (answer or dismiss it in the app; the status line says how many are urgent), and notes still processing when a Worker is configured.
 - Filenames are stable per note: `YYYY-MM-DD-slug-<id8>.md`. Renaming in Obsidian is fine; the `id` in frontmatter is the identity.

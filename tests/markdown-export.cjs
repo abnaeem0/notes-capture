@@ -16,8 +16,10 @@ vm.runInContext('downloadBlob = (blob, name) => { globalThis.download = {blob, n
   Object.assign(n.ai, { type: 'reminder', cleaned_text: "Get Sarah's reply on the budget tomorrow.", summary: 'Get Sarah budget reply', topics: ['budget', 'work stuff'], fields: { action: 'Get reply', due_datetime: '2026-10-31T09:00', location: '' } });
   a.normalizeNote(n);
   const md = a.noteToMarkdown(n);
-  assert(md.startsWith('---\nid: "abcd1234-ef56"\ntype: reminder\nstatus: open\n'));
-  assert(md.includes('due: "2026-10-31T09:00"') && md.includes('action: "Get reply"'));
+  // An old 'reminder' with old fields is read as a Task with when/where/who.
+  assert(md.startsWith('---\nid: "abcd1234-ef56"\ntype: task\nstatus: open\n'), md);
+  assert(md.includes('when: "2026-10-31T09:00"') && !md.includes('action:'));
+  assert.equal(n.legacy_v4.ai_type, 'reminder'); assert.equal(n.legacy_v4.ai_fields.action, 'Get reply');
   assert(!md.includes('where:'), 'empty fields are omitted');
   assert(md.includes('tags: ["budget", "work-stuff"]'));
   assert(md.includes('# Get Sarah budget reply') && md.includes('## Original') && md.includes('Sarah se kal budget'));
@@ -28,9 +30,13 @@ vm.runInContext('downloadBlob = (blob, name) => { globalThis.download = {blob, n
   assert(md2.includes('type: note') && !md2.includes('## Original'), 'unprocessed note exports raw text once');
   assert(a.noteFilename(u).endsWith('-u1.md'));
 
-  // Urgency lands in frontmatter
-  n.ai.urgency = 'urgent'; n.ai.urgency_reason = 'court hearing';
+  // Urgency is the "urgent" tag now and lands in frontmatter
+  n.ai.urgency = 'urgent'; n.ai.urgency_reason = 'court hearing'; a.normalizeNote(n);
+  assert(n.ai.topics.includes('urgent') && !('urgency' in n.ai));
   assert(a.noteToMarkdown(n).includes('urgent: true\nurgent_reason: "court hearing"'));
+  n.user.tags_removed = ['urgent'];
+  assert(!a.noteToMarkdown(n).includes('urgent: true'), 'removing the tag removes urgency');
+  n.user.tags_removed = [];
 
   // Export-once: new notes only, uncertain transcripts held back, processing notes wait (when a Worker is set)
   const review = a.Capture.makeNote('voice'); review.id = 'rev1'; review.status = 'transcription_review'; review.input.raw_text = 'maybe words'; a.normalizeNote(review);
