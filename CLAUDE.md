@@ -1,11 +1,51 @@
-# NoteCapture
+# CLAUDE.md
 
-Voice/text note capture for one person who writes and speaks English, Urdu and Roman Urdu. Notes are cleaned into English, classified, tagged, searchable, and exported to Obsidian, where the user does long-term filing, todos and search.
+## About me
+I'm not an experienced developer. Explain trade-offs simply, warn me before hard-to-undo changes, and push back on low-value or premature work.
+
+## Workflow
+- Read `PLAN.md` before starting any task.
+- After finishing a task, check it off in `PLAN.md` with a short note on what changed and why.
+- Build one small piece at a time. Do not bundle unrelated changes.
+- When I make a decision, record it under **Decisions** in `PLAN.md`.
+- The only docs in this repo are `CLAUDE.md` (how to work here) and `PLAN.md` (direction, decisions, to-dos, open questions, bugs). Don't add other docs.
+
+## Rule
+Use the project map below to find relevant files instead of reading the whole repo. Update the map when files are added, moved or removed.
+
+## What this project is
+NoteCapture: voice/text note capture for one person who writes and speaks English, Urdu and Roman Urdu. Notes are cleaned into English, classified, tagged and searchable.
+
+The app is the main home for notes. Obsidian markdown is a backup to export to and occasionally import from. This direction was set on 2026-10-31 (see `PLAN.md`). The **Obsidian export** section below still describes the current, older behaviour until that work ships.
+
+## Project map
+
+**Frontend** (static site, no build step, no dependencies)
+- `index.html`: all screens and markup.
+- `styles.css`: all styles.
+- `app.js`: all frontend logic, in numbered sections:
+  - `CONFIG`: constants, storage keys (`CONFIG.KEYS`), prices.
+  - `Store`: every note read/write, the pending queue, settings, `migrateNotes()`. `AudioStore`: recordings in IndexedDB. `Usage`: cost tracking. `Backup`: JSON backup/restore and `exportMarkdown()` for Obsidian.
+  - `Auth`: passcode gate. `Capture`: mic and text input. `Queue`: sending notes to the Worker, retries.
+  - `Search`: semantic search (embeddings cached in IndexedDB `nc_search`, `cosine()` ranking) with keyword fallback.
+  - `Render`: notes list and cards. `Modal`: note detail/edit. `Settings`, `AudioPlayer`, `Diagnostics`, `UI`: their screens and helpers.
+  - `_getFinal*` helpers: read a note's final values (user edits win over AI output).
+
+**Worker** (`worker/`)
+- `worker.js`: stateless Cloudflare Worker. Routes: `/ping`, `/prompts`, `/diagnose`, `/embeddings` (Workers AI `bge-m3`), `/process` (Groq Whisper transcription, then cleaning and classification with Groq `openai/gpt-oss-*`). The built-in prompt is `DEFAULT_PROCESSING_PROMPT`.
+- `wrangler.jsonc`: Worker name and the Workers AI binding `AI`.
+
+**Tests** (`tests/`, mock the DOM with `vm`; there is no browser test)
+- `frontend.cjs`: app state, backup/restore, queue.
+- `markdown-export.cjs`: Obsidian export, usage tracking, copy button.
+- `worker.mjs`: transcription quality and retries.
+- `worker-usage.mjs`: model allowlist, usage reporting, urgency.
 
 ## Architecture
-- **Frontend** (`index.html`, `app.js`, `styles.css`): static site, no build step, no dependencies. Notes live in the browser's `localStorage` (`nc_notes`); recordings in IndexedDB (`nc_audio_store`); search vectors in a disposable IndexedDB cache (`nc_search`). There is no server-side copy of notes.
-- **Worker** (`worker/worker.js`): stateless Cloudflare Worker. It transcribes (Groq Whisper Large V3), cleans and classifies (Groq `openai/gpt-oss-*`), and embeds for search (Workers AI `bge-m3`). It stores nothing.
-- Secrets live only in Cloudflare: `PASSCODE`, `GROQ_API_KEY`. The Workers AI binding is named `AI`. Never put keys in the repo or the frontend.
+- Notes live in the browser's `localStorage` (`nc_notes`); recordings in IndexedDB (`nc_audio_store`); search vectors in a disposable IndexedDB cache (`nc_search`). There is no server-side copy of notes. One device only, by choice.
+- All note reads and writes go through `Store`, so storage can move to IndexedDB, or a cloud copy can be added later, without touching callers. Don't bypass it.
+- The Worker stores nothing.
+- Secrets live only in Cloudflare: `PASSCODE`, `GROQ_API_KEY`. Never put keys in the repo or the frontend.
 - Frontend and Worker are versioned together by `API_VERSION` (currently 2). Add response fields without bumping it; bump it only for breaking changes. Always redeploy the Worker when `worker.js` changes, or the new features silently do nothing.
 
 ## Commands
@@ -16,7 +56,7 @@ node tests/worker.mjs            # transcription quality + retries
 node tests/worker-usage.mjs      # model allowlist, usage reporting, urgency
 node --check app.js              # quick syntax check
 ```
-Tests mock the DOM with `vm`; there is no browser test. Check UI changes by hand on a phone.
+Check UI changes by hand on a phone.
 
 ## Conventions
 - Note shape: `input` (original text, audio), `ai` (model output, never overwritten by user edits), `user` (overrides: `type_override`, `cleaned_text`, `fields`, tags), `sync`. Read through the `_getFinal*` helpers so user edits win.
@@ -25,18 +65,21 @@ Tests mock the DOM with `vm`; there is no browser test. Check UI changes by hand
 - New settings go through `CONFIG.KEYS`; `clearAll` wipes every key listed there.
 - Groq list prices are in `CONFIG.PRICES` and are estimates. Re-check them before relying on the cost readout.
 
-## Obsidian export (`Backup.exportMarkdown`)
+## Obsidian export (`Backup.exportMarkdown`), current behaviour
 - One `.md` per note in a ZIP: frontmatter (id, type, status, urgent, due/when/where, tags, source, created, updated) + English text + `## Original`.
 - **Each note is exported once**, tracked by id in `nc_md_exported`, so unzipping never duplicates. After export Obsidian owns the note; later edits in the app do not flow back. "Export all again" exists but can duplicate.
 - After export the app copy gets `user.exported_at` (shown as "In Obsidian") and is archived, never deleted. It keeps the original text and lets us re-export if the file format improves. Archiving only happens on a note's first export.
 - Held back until resolved: notes with an uncertain transcript (`transcription_review`; the audio only exists in the app), notes with an unanswered AI question (answer or dismiss it in the app; the status line says how many are urgent), and notes still processing when a Worker is configured.
 - Filenames are stable per note: `YYYY-MM-DD-slug-<id8>.md`. Renaming in Obsidian is fine; the `id` in frontmatter is the identity.
-
-## To-do
-Planned work and open ideas live in `TODO.md`. Read it before starting a feature, and move items out of it when they ship.
+- Planned replacement (repeatable export, simple import with conflict notes): see **Decisions** in `PLAN.md`.
 
 ## Custom prompt
 A saved custom prompt rewrites `cleaned_text` only; type, tags, urgency and questions still run from the built-in prompt. With the "Use my prompt only" box ticked (`nc_skip_classify`, sent as `classify: false`), the Worker uses the user's prompt on its own and returns a plain `note` with no summary, tags, urgency or questions. The flag is ignored when no custom prompt is saved.
+
+## Things to be careful with
+- My own edits must never be overwritten by AI results (`user.*` wins over `ai.*`).
+- Notes exist only on one device. Anything that deletes, migrates or rewrites stored notes: warn me first and make sure a backup exists.
+- Changing `worker.js` does nothing until the Worker is redeployed.
 
 ## Known limits
 - Audio is deleted from the device as soon as a transcript passes the quality checks. Only uncertain transcripts keep their recording, until you retry successfully or delete it.
