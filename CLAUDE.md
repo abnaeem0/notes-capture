@@ -41,7 +41,7 @@ The app is the main home for notes. Obsidian markdown is a backup to export to a
 - `markdown-export.cjs`: Obsidian export, usage tracking, copy button.
 - `worker.mjs`: transcription quality and retries.
 - `worker-usage.mjs`: model allowlist, usage reporting, urgency.
-- `storage.cjs`: IndexedDB move and recovery cases, schema 4, backup reminder (uses a small fake IndexedDB).
+- `storage.cjs`: IndexedDB move and recovery cases, schema 5, backup reminder (uses a small fake IndexedDB).
 - `related.cjs`: similar notes, links, projects, project view.
 - `types.cjs`: three types, version 5 migration, urgency as a tag, old backups and old Worker answers.
 
@@ -50,7 +50,7 @@ The app is the main home for notes. Obsidian markdown is a backup to export to a
 - All note reads and writes go through `Store`, so storage can move to IndexedDB, or a cloud copy can be added later, without touching callers. Don't bypass it.
 - The Worker stores nothing.
 - Secrets live only in Cloudflare: `PASSCODE`, `GROQ_API_KEY`. Never put keys in the repo or the frontend.
-- Frontend and Worker are versioned together by `API_VERSION` (currently 2). Add response fields without bumping it; bump it only for breaking changes. Always redeploy the Worker when `worker.js` changes, or the new features silently do nothing.
+- Frontend and Worker are versioned together by `API_VERSION` (currently 2). Add response fields without bumping it; bump it only for breaking changes. The Worker deploys automatically when `main` is pushed (set up in Cloudflare), so a push updates the app and the Worker together. If the Worker version on `/ping` (`WORKER_VERSION`) doesn't change after a push, the deploy failed: check it in Cloudflare.
 
 ## Commands
 ```
@@ -89,7 +89,7 @@ A saved custom prompt rewrites `cleaned_text` only; type, tags, urgency and ques
 - Notes exist only on one device. Anything that deletes, migrates or rewrites stored notes: warn me first and make sure a backup exists.
 - Pushing to `main` goes live on my phone the next time I open the app. Tell me before anything is pushed.
 - Never read or write the `nc_notes` localStorage key directly; go through `Store`.
-- Changing `worker.js` does nothing until the Worker is redeployed.
+- A push to `main` also redeploys the Worker. Changes to `worker.js` go live with the push, for every note processed after it.
 
 ## Known limits
 - Audio is deleted from the device as soon as a transcript passes the quality checks. Only uncertain transcripts keep their recording, until you retry successfully or delete it.
