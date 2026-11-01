@@ -48,6 +48,7 @@ Everything that isn't instructions for Claude lives here: direction, decisions, 
 - [ ] **Remove the pre-move `nc_notes` safety copy** from localStorage once the IndexedDB storage has run fine for a few weeks.
 - [ ] **Related notes feed the classifier.** Send the top matches' tags and project with `existing_topics`, so suggested tags and project match what you already use. Needs the embedding to run before classification (one extra round trip).
 - [ ] **Personal dictionary.** Names and terms (people, places, courts, Urdu words) fed into the Whisper prompt (700 character limit) and the classifier. Today only "Transcription guidance" exists.
+- [ ] **Create a linked note from search.** From a search result, start a new note that's already linked to that result (e.g. a follow-up or answer). Low priority.
 - [ ] **Bulk triage view** for notes with open questions or missing dates: one screen, answer one after another.
 - [ ] **Open in Obsidian button.** `obsidian://adv-uri?vault=<name>&uid=<id>` via the Advanced URI plugin. Less important now that the app is the main home.
 - [ ] **Obsidian vault setup** (not code; do on the phone). Vault in a normal folder such as Documents so Files can unzip into it; an `Inbox/` folder; Bases views over the frontmatter (Urgent, Due this week, Needs attention, Waiting).
