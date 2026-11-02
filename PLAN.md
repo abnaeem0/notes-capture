@@ -62,6 +62,7 @@ Everything that isn't instructions for Claude lives here: direction, decisions, 
 ## Open questions
 - Task "assigned to": tasks I hand to other people, tasks others give me, or both?
 - Should "Link" also add the reverse link on the other note by default, or only via "Link both ways"? (Built as one-way for now.)
+- **Search finds less than "Similar notes" (to discuss, nothing decided).** Likely causes: a short query vs a whole note scores low, and the 40% cut-off is a guess; keyword matches (even partial ones) always rank above meaning matches; Roman Urdu queries are matched against English-only vectors; notes not yet indexed, or being offline, give keyword-only results. Options, cheapest first: (1) show "% match" on search results and collect a few failed searches to tune the cut-off (free); (2) rank keyword and meaning matches together by score instead of keywords always first (free, but exact hits may drop a little); (3) have the AI rewrite the query into English and into a fuller sentence before searching (one AI call per search, about 1 s slower, Worker change); (4) have the AI re-rank the top ~20 results (best quality, more cost and delay). Start with 1 and real examples before choosing.
 - Similarity cut-off for related notes: set to 60% (`Related.MIN_SCORE`). Adjust once real notes show which scores are good matches.
 
 ## Known bugs
